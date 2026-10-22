@@ -1,0 +1,31 @@
+{
+  "name": "dsh-think-chinese",
+  "version": "0.1.0",
+  "description": "DSH 插件：让模型始终用中文进行内部推理与思考（think in Chinese）。",
+  "keywords": [
+    "chinese",
+    "dsh",
+    "dsh-plugin",
+    "plugin"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lyshick/Lyshick-dsh-plug.git",
+    "directory": "plugins/dsh-think-chinese"
+  },
+  "type": "module",
+  "main": "index.mjs",
+  "files": [
+    "index.mjs",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test tests/"
+  }
+}

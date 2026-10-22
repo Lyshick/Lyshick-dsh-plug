@@ -1,0 +1,52 @@
+{
+  "name": "dsh-web-search-ark",
+  "version": "1.1.0",
+  "description": "Volcengine Ark (火山方舟) web-search provider for DeepSeek Harness: routes the built-in web_search capability through the Ark Responses API native 联网内容插件 (web_search tool), with a configuration card in the sidebar Plugins page.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./lib/*": "./lib/*",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "web-search",
+    "volcengine",
+    "ark",
+    "doubao"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lyshick/Lyshick-dsh-plug.git",
+    "directory": "plugins/dsh-web-search-ark"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

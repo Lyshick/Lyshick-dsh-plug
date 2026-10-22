@@ -1,0 +1,4 @@
+# dsh-think-chinese bundle layer: mount the plugin row.
+- insert:
+    - id: think-in-chinese
+      name: dsh-think-chinese

@@ -1,0 +1,13 @@
+# dsh bundle layer: mount the dsh-web-search-ark provider.
+#
+# The row config (defaults, overridable from the profile's cordis.patch.yml):
+#   apiKeyEnv   credential reference holding the Ark API key (default ATEST_API_KEY)
+#   baseURL     Ark Responses-API base; "/responses" is appended
+#   model       model id that runs the search sub-task (must support web_search)
+#   maxKeyword  max keyword searches one round may fan out to (Ark allows 1-50)
+#   timeoutMs   per-search timeout
+#
+# Select it with:  - id: web \n    config: { searchProvider: ark-official }
+- insert:
+    - id: web-search-ark
+      name: dsh-web-search-ark
