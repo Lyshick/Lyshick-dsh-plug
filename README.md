@@ -1,6 +1,6 @@
 # Lyshick-dsh-plug · DeepSeek Harness 插件合集
 
-本仓库托管 [DeepSeek Harness (DSH)](https://www.deepseek.com/) 的 4 个插件，每个插件位于 `plugins/` 下的独立子目录，可直接通过 `github:` 安装链接从本仓库安装。
+本仓库托管 [DeepSeek Harness (DSH)](https://www.deepseek.com/) 的 5 个插件，每个插件位于 `plugins/` 下的独立子目录，可直接通过 `github:` 安装链接从本仓库安装。
 
 ## 插件列表
 
@@ -10,6 +10,7 @@
 | [dsh-think-chinese](plugins/dsh-think-chinese/) | 0.1.0 | 让模型始终用中文进行内部推理与思考（think in Chinese） |
 | [dsh-quota-board](plugins/dsh-quota-board/) | 0.1.0 | 模型供应商额度看板：展示各供应商的余额、套餐窗口与本地 token 用量 |
 | [dsh-chat-manage](plugins/dsh-chat-manage/) | 0.1.2 | 会话管理：从侧边栏菜单删除会话，浏览、恢复或删除已归档的会话 |
+| [dsh-spec-inspect](plugins/dsh-spec-inspect/) | 0.1.0 | 业务规范检视：会话右上角入口 → 选择内部渠道的 HTML 业务规范（md / doc / docx）→ AI 按文档要求检索工作区，问题按文档的 P0-P5 分级罗列 |
 
 ## 安装方法
 
@@ -20,6 +21,7 @@ github:Lyshick/Lyshick-dsh-plug#path:plugins/dsh-web-search-ark
 github:Lyshick/Lyshick-dsh-plug#path:plugins/dsh-think-chinese
 github:Lyshick/Lyshick-dsh-plug#path:plugins/dsh-quota-board
 github:Lyshick/Lyshick-dsh-plug#path:plugins/dsh-chat-manage
+github:Lyshick/Lyshick-dsh-plug#path:plugins/dsh-spec-inspect
 ```
 
 链接格式说明：`github:<用户>/<仓库>#path:<仓库内插件目录>`。`#path:` 指向插件在本仓库中的子目录，安装时 pnpm 会只拉取该子目录对应的包。
@@ -41,7 +43,8 @@ plugins/
 ├── dsh-web-search-ark/   # 火山方舟联网搜索
 ├── dsh-think-chinese/    # 中文内部推理
 ├── dsh-quota-board/      # 供应商额度看板
-└── dsh-chat-manage/      # 会话管理
+├── dsh-chat-manage/      # 会话管理
+└── dsh-spec-inspect/     # 业务规范检视
 ```
 
 ## 来源与致谢

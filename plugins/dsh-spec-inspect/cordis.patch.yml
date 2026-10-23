@@ -1,0 +1,5 @@
+- insert:
+    - id: spec-inspect
+      name: dsh-spec-inspect
+      config:
+        indexUrl: ''

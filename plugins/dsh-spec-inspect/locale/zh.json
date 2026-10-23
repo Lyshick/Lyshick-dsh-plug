@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "规范检视",
+    "description": "从 JSON 索引源选择公司内部渠道的 HTML 业务规范文档（Markdown / Word），让 AI 按文档要求检索当前工作区代码，并按文档定义的 P0-P5 分级罗列问题。"
+  }
+}

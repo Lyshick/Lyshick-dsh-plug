@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Spec Inspect",
+    "description": "Pick a company HTML business-spec document (Markdown or Word) from a JSON index source, let the AI inspect the current workspace, and list findings under the document's P0-P5 levels."
+  }
+}
