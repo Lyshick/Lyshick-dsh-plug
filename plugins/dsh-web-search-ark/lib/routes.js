@@ -92,7 +92,8 @@ async function readJsonBody(req) {
  * server (TUI/headless): the provider still registers, only the card is absent.
  *
  * @param ctx - plugin context.
- * @param deps - `getConfig` returns the effective options; `probe` runs a live search.
+ * @param deps - `getConfig` returns the effective options; `probe` runs a live search;
+ *   `checkKey` preflights the credential (async); `getStatus` snapshots mount/selection state.
  */
 export function registerRoutes(ctx, deps) {
   ctx.inject(['webServer'], (sctx) => {
@@ -104,6 +105,15 @@ export function registerRoutes(ctx, deps) {
           handler: async (req, res) => {
             const pathname = new URL(req.url ?? '/', 'http://x').pathname
             try {
+              if (pathname === '/ark-search/status' && req.method === 'GET') {
+                // `selectedProvider` is best-effort (the seam has no official
+                // observation API in 0.2.x); `keyResolved` is a live async
+                // preflight so a missing credential shows up here before the
+                // first real search, not only at search time.
+                const status = deps.getStatus?.() ?? { mounted: true }
+                const keyResolved = deps.checkKey ? await deps.checkKey() : null
+                return json(res, 200, { ok: true, value: { ...status, keyResolved } })
+              }
               if (pathname === '/ark-search/client-ready' && req.method === 'POST') {
                 const body = await readJsonBody(req)
                 try {

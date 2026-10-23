@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-search-ark",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Volcengine Ark (火山方舟) web-search provider for DeepSeek Harness: routes the built-in web_search capability through the Ark Responses API native 联网内容插件 (web_search tool), with a configuration card in the sidebar Plugins page.",
   "type": "module",
   "main": "index.js",

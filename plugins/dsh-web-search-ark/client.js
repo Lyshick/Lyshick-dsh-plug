@@ -34,6 +34,20 @@ const zh = {
   maxKeyword: '单轮关键词上限',
   maxKeywordHint: '方舟允许 1–50，直接影响计费次数',
   timeoutMs: '超时（毫秒）',
+  statusChecking: '正在检查启用状态…',
+  statusOn: '已启用：web.searchProvider → ark-official',
+  statusOffConfigured: '未启用：当前 web.searchProvider 是 “{id}”，搜索不会经过方舟',
+  statusOffUnset: '未启用：web.searchProvider 未设置，且存在多个搜索 provider，无法自动选中',
+  statusUnknown: '无法确定启用状态（当前 Host 未暴露 selection）；若搜索仍走旧 provider，请检查 web 行 selection',
+  activateTitle: '激活步骤（必做，否则插件不会生效）',
+  activateBody: '把下面这段追加到 profile 的 cordis.patch.yml（与 bundles 同级），然后重启 DeepSeek Harness：',
+  activatePath: '目标文件：{path}',
+  activatePathGeneric: '目标文件：~/.dsh/profiles/<你的 profile>/cordis.patch.yml（桌面版通常为 desktop）',
+  copy: '复制 YAML',
+  copied: '已复制',
+  copyFail: '复制失败，请手动选择文本复制',
+  keyMissing: '凭证未就绪：{reason}',
+  keyOk: '凭证就绪',
   save: '保存',
   saving: '保存中…',
   saved: '已保存，下次搜索生效',
@@ -63,6 +77,20 @@ const en = {
   maxKeyword: 'Max keywords per round',
   maxKeywordHint: 'Ark allows 1–50; drives billing',
   timeoutMs: 'Timeout (ms)',
+  statusChecking: 'Checking activation…',
+  statusOn: 'Enabled: web.searchProvider → ark-official',
+  statusOffConfigured: 'Not enabled: web.searchProvider is “{id}” — searches bypass Ark',
+  statusOffUnset: 'Not enabled: web.searchProvider is unset and several search providers exist, so none is auto-selected',
+  statusUnknown: 'Activation unknown (this Host does not expose the selection); if searches still use the old provider, check the web row selection',
+  activateTitle: 'Activation steps (required — the plugin does nothing without them)',
+  activateBody: 'Append this to the profile’s cordis.patch.yml (sibling of bundles), then restart DeepSeek Harness:',
+  activatePath: 'Target file: {path}',
+  activatePathGeneric: 'Target file: ~/.dsh/profiles/<your profile>/cordis.patch.yml (usually desktop)',
+  copy: 'Copy YAML',
+  copied: 'Copied',
+  copyFail: 'Copy failed — select the text manually',
+  keyMissing: 'Credential not resolved: {reason}',
+  keyOk: 'Credential ready',
   save: 'Save',
   saving: 'Saving…',
   saved: 'Saved — applies to the next search',
@@ -140,6 +168,130 @@ const EMPTY_DRAFT = {
   timeoutMs: 120000,
 }
 
+// Activation selection snippet — the exact text the card copies for the user.
+const ACTIVATE_YAML = [
+  '- id: web',
+  '  name: "@deepseek-ai/dsh-web"',
+  '  config:',
+  '    searchProvider: ark-official',
+  '    fetchProvider: http',
+].join('\n')
+
+/** Copy text to the clipboard with a textarea fallback for older webviews. */
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    try {
+      const area = document.createElement('textarea')
+      area.value = text
+      area.style.position = 'fixed'
+      area.style.opacity = '0'
+      document.body.appendChild(area)
+      area.select()
+      const ok = document.execCommand('copy')
+      document.body.removeChild(area)
+      return ok
+    } catch {
+      return false
+    }
+  }
+}
+
+function StatusBadge({ t, status, loading }) {
+  if (loading) return h('div', { style: badgeStyle('var(--dsw-alias-label-caption)') }, t('statusChecking'))
+  if (!status) return h('div', { style: badgeStyle('var(--dsw-alias-state-error-primary)') }, t('statusUnknown'))
+  const color =
+    status.selected === true
+      ? 'var(--dsw-alias-state-success-primary)'
+      : status.selected === false
+        ? 'var(--dsw-alias-state-error-primary)'
+        : 'var(--dsw-alias-label-caption)'
+  const text =
+    status.selected === true
+      ? t('statusOn')
+      : status.selected === false
+        ? status.configuredSearchProvider
+          ? format(t('statusOffConfigured'), { id: status.configuredSearchProvider })
+          : t('statusOffUnset')
+        : t('statusUnknown')
+  return h('div', { style: badgeStyle(color) }, text)
+}
+
+function badgeStyle(color) {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+    padding: '4px 10px',
+    borderRadius: 999,
+    fontSize: 12,
+    lineHeight: '18px',
+    fontWeight: 500,
+    color,
+    border: `1px solid ${color}`,
+    background: 'transparent',
+  }
+}
+
+function ActivatePanel({ t, status }) {
+  const [copied, setCopied] = useState('')
+  const patchFiles = Array.isArray(status?.patchFiles) ? status.patchFiles : []
+  const target = patchFiles.length === 1 ? format(t('activatePath'), { path: patchFiles[0] }) : t('activatePathGeneric')
+  const copy = async () => {
+    const ok = await copyText(ACTIVATE_YAML)
+    setCopied(ok ? 'ok' : 'fail')
+  }
+  return h('div', {
+    style: {
+      padding: 12,
+      border: '1px solid var(--dsw-alias-state-error-primary)',
+      borderRadius: 8,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    },
+  }, [
+    h('strong', { key: 't', style: { fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-state-error-primary)' } }, t('activateTitle')),
+    h('p', { key: 'b', style: { margin: 0, fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-primary)' } }, t('activateBody')),
+    h('pre', {
+      key: 'code',
+      style: {
+        margin: 0,
+        padding: 10,
+        borderRadius: 6,
+        overflow: 'auto',
+        background: 'var(--dsw-alias-bg-base)',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        font: '12px/18px ui-monospace, Consolas, monospace',
+        color: 'var(--dsw-alias-label-primary)',
+      },
+    }, ACTIVATE_YAML),
+    h('p', { key: 'p', style: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-caption)' } }, target),
+    h('div', { key: 'actions', style: { display: 'flex', alignItems: 'center', gap: 8 } }, [
+      h('button', {
+        key: 'copy',
+        type: 'button',
+        onClick: copy,
+        style: {
+          height: 28,
+          borderRadius: 14,
+          padding: '0 12px',
+          border: '1px solid var(--dsw-alias-border-l2)',
+          background: 'transparent',
+          color: 'var(--dsw-alias-label-primary)',
+          font: 'inherit',
+          fontSize: 12,
+          cursor: 'pointer',
+        },
+      }, copied === 'ok' ? t('copied') : t('copy')),
+      copied === 'fail' ? h('span', { key: 'fail', style: { fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' } }, t('copyFail')) : null,
+    ]),
+  ])
+}
+
 function draftOf(config) {
   return {
     apiKeyEnv: config?.apiKeyEnv ?? '',
@@ -155,6 +307,7 @@ function ArkSearchForm({ t, view }) {
   const [draft, setDraft] = useState(EMPTY_DRAFT)
   const [file, setFile] = useState({})
   const [path, setPath] = useState('')
+  const [status, setStatus] = useState(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
   const [note, setNote] = useState(null)
@@ -162,10 +315,11 @@ function ArkSearchForm({ t, view }) {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const value = await call('/settings')
+      const [value, statusValue] = await Promise.all([call('/settings'), call('/status')])
       setDraft(draftOf(value.config))
       setFile(value.file ?? {})
       setPath(value.path ?? '')
+      setStatus(statusValue ?? null)
       setNote(null)
     } catch (error) {
       setNote({ kind: 'err', text: format(t('loadFail'), { message: String(error?.message ?? error) }) })
@@ -234,6 +388,18 @@ function ArkSearchForm({ t, view }) {
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 760 } }, [
     h('h3', { key: 'title', style: { margin: 0, fontSize: 16, fontWeight: 500, lineHeight: '24px', color: 'var(--dsw-alias-label-primary)' } }, t('title')),
     h('p', { key: 'intro', style: { margin: 0, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-tertiary)' } }, t('intro')),
+
+    h(StatusBadge, { key: 'badge', t, status, loading }),
+
+    status?.keyResolved && status.keyResolved.ok === false
+      ? h('p', { key: 'key', style: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary)' } }, format(t('keyMissing'), { reason: String(status.keyResolved.reason ?? '') }))
+      : status?.keyResolved?.ok === true
+        ? h('p', { key: 'key', style: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-success-primary)' } }, t('keyOk'))
+        : null,
+
+    status != null && status.selected !== true && !loading
+      ? h(ActivatePanel, { key: 'activate', t, status })
+      : null,
 
     h(GroupTitle, { key: 'g1' }, t('groupCore')),
     h(Field, { key: 'f1', label: t('apiKeyEnv'), hint: t('apiKeyEnvHint') },

@@ -22,7 +22,7 @@
  *
  * @module dsh-web-search-ark
  */
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, readdirSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { effectiveSettings, registerRoutes } from './lib/routes.js'
@@ -39,6 +39,8 @@ export const inject = ['web']
 /**
  * Audit file (JSONL under ~/.dsh) recording each search attempt.
  *
+ * `DSH_WEB_SEARCH_ARK_AUDIT_FILE` overrides the path (self-test isolation).
+ *
  * Deliberately NOT a session event: `Session.append(type, data, opts)` ignores
  * any `ignorable` option (its opts only carry `surfaceOp` / `sourceEventSeqs`),
  * so a custom type lands in the log unmarked — and a harness build that does
@@ -47,7 +49,7 @@ export const inject = ['web']
  * (`appendPluginRecord`, `plugin:`-prefixed types) is not reachable without
  * importing `@deepseek-ai/dsh-session`, which this package avoids by design.
  */
-const AUDIT_FILE = join(homedir(), '.dsh', 'web-search-ark.audit.jsonl')
+const AUDIT_FILE = process.env.DSH_WEB_SEARCH_ARK_AUDIT_FILE ?? join(homedir(), '.dsh', 'web-search-ark.audit.jsonl')
 
 /** Default Ark Responses-API base. `/responses` is appended. */
 const DEFAULT_BASE_URL = 'https://ark.cn-beijing.volces.com/api/plan/v3'
@@ -55,8 +57,14 @@ const DEFAULT_BASE_URL = 'https://ark.cn-beijing.volces.com/api/plan/v3'
 /** Default model that runs the search sub-task on this deployment. */
 const DEFAULT_MODEL = 'deepseek-v4-1-flash-261017'
 
-/** Default credential reference (the same key the chat route uses). */
-const DEFAULT_API_KEY_ENV = 'ATEST_API_KEY'
+/**
+ * Credential references tried in order (credentials service first, then the
+ * launching environment); the first resolvable wins. `ARK_API_KEY` is the name
+ * Volcengine's own docs use; `HUOSHAN_API_KEY` covers deployments where the
+ * Ark key is shared with the chat route; `ATEST_API_KEY` keeps 1.1.0 setups
+ * working. Override with a comma-separated `apiKeyEnv` in the config.
+ */
+const DEFAULT_API_KEY_ENVS = ['ARK_API_KEY', 'HUOSHAN_API_KEY', 'ATEST_API_KEY']
 
 /** Default upper bound on keyword searches per round (Ark allows 1-50). */
 const DEFAULT_MAX_KEYWORD = 5
@@ -92,6 +100,13 @@ function credentialRef(value) {
   return String(value ?? '').trim()
 }
 
+/** Normalize a string ("A,B") or array credential reference into a list. */
+function credentialRefs(value) {
+  const list = Array.isArray(value) ? value : String(value ?? '').split(',')
+  const refs = list.map(credentialRef).filter((ref) => ref.length > 0)
+  return refs.length > 0 ? refs : [...DEFAULT_API_KEY_ENVS]
+}
+
 /** Strip trailing slashes so a base URL can be joined with a path suffix. */
 function trimSlash(value) {
   return String(value ?? '').trim().replace(/\/+$/u, '')
@@ -118,7 +133,7 @@ function normalizeOptions(config) {
   const timeoutMs = Number(read(config, 'timeoutMs'))
   return {
     apiKey: read(config, 'apiKey'),
-    apiKeyEnv: credentialRef(read(config, 'apiKeyEnv')) || DEFAULT_API_KEY_ENV,
+    apiKeyEnvs: credentialRefs(read(config, 'apiKeyEnv')),
     baseURL: String(read(config, 'baseURL') ?? '').trim() || DEFAULT_BASE_URL,
     model: String(read(config, 'model') ?? '').trim() || DEFAULT_MODEL,
     maxKeyword: Number.isInteger(maxKeyword) && maxKeyword >= 1 && maxKeyword <= 50 ? maxKeyword : DEFAULT_MAX_KEYWORD,
@@ -206,21 +221,33 @@ export function mapArkResponse(payload) {
   return { sources, truncated: false }
 }
 
-/** Resolve the Ark API key from the literal, the credentials service, or the launching env. */
+/**
+ * Resolve the Ark API key from the literal, the credentials service, or the
+ * launching environment. Each candidate reference is checked against both
+ * sources in turn so a mixed setup (one ref stored, another exported) works.
+ */
 async function resolveApiKey(ctx, options) {
   if (typeof options.apiKey === 'string' && options.apiKey.trim().length > 0) return options.apiKey.trim()
-  const ref = options.apiKeyEnv
-  let stored
-  try {
-    stored = await ctx.get('credentials')?.resolve(ref)
-  } catch {
-    stored = undefined
+  // Defensively normalize: callers may hand over a raw config snapshot whose
+  // `apiKeyEnvs` was never run through `normalizeOptions`.
+  const refs =
+    Array.isArray(options.apiKeyEnvs) && options.apiKeyEnvs.length > 0
+      ? options.apiKeyEnvs.map(credentialRef).filter((ref) => ref.length > 0)
+      : credentialRefs(options.apiKeyEnv)
+  for (const ref of refs.length > 0 ? refs : DEFAULT_API_KEY_ENVS) {
+    let stored
+    try {
+      stored = await ctx.get('credentials')?.resolve(ref)
+    } catch {
+      stored = undefined
+    }
+    if (typeof stored?.value === 'string' && stored.value.trim().length > 0) return stored.value.trim()
+    const ambient = process.env[ref]
+    if (typeof ambient === 'string' && ambient.trim().length > 0) return ambient.trim()
   }
-  if (typeof stored?.value === 'string' && stored.value.trim().length > 0) return stored.value.trim()
-  const ambient = process.env[ref]
-  if (typeof ambient === 'string' && ambient.trim().length > 0) return ambient.trim()
   throw new ArkSearchError(
-    `Ark search has no API key for "${ref}". Store it in ~/.dsh/.credentials.yaml, export it in the launching environment, or set a literal "apiKey" in the web-search-ark config.`,
+    `Ark search has no API key. Tried credential refs [${refs.join(', ')}] against the credentials service and the launching environment. ` +
+      `Store one in ~/.dsh/.credentials.yaml (under refs:), export it in the launching environment, or set a literal "apiKey" / a comma-separated "apiKeyEnv" in the web-search-ark config.`,
     'WEB_PROVIDER_CREDENTIAL_MISSING',
   )
 }
@@ -244,10 +271,33 @@ export class ArkSearchProvider {
     return isHttpUrl(options.baseURL) && isKeywordCount(options.maxKeyword)
   }
 
+  /**
+   * Run one search. Every attempt — success or failure — appends exactly one
+   * audit line written in `finally`, so "no audit line ⇒ the provider was not
+   * selected" is a reliable diagnostic and credential failures leave a trace.
+   */
   async search(request, signal) {
     const options = this.getConfig()
+    const startedAt = Date.now()
     const endpoint = `${trimSlash(options.baseURL)}/responses`
+    let outcome = { ok: false, code: 'WEB_PROVIDER_ERROR' }
+    try {
+      const result = await this.#run(endpoint, options, request, signal, outcome)
+      return result
+    } catch (error) {
+      if (typeof error?.code === 'string' && error.code.length > 0) {
+        outcome = { ok: false, code: error.code }
+      }
+      throw error
+    } finally {
+      this.record(endpoint, options, outcome, startedAt)
+    }
+  }
+
+  /** The actual search body; mutates `outcome` on the paths that reach it. */
+  async #run(endpoint, options, request, signal, outcome) {
     if (!isHttpUrl(options.baseURL)) {
+      outcome.code = 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE'
       throw new ArkSearchError(
         `Ark search baseURL ${JSON.stringify(options.baseURL)} is not an absolute HTTP(S) URL`,
         'WEB_PROVIDER_CONFIGURED_UNAVAILABLE',
@@ -262,8 +312,6 @@ export class ArkSearchProvider {
       tools: [{ type: 'web_search', max_keyword: options.maxKeyword }],
       include: ['web_search_call.action.sources'],
     }
-
-    this.record(endpoint, options, body)
 
     const controller = new AbortController()
     const timeout = setTimeout(() => {
@@ -320,18 +368,25 @@ export class ArkSearchProvider {
         cause: error,
       })
     }
-    return mapArkResponse(payload)
+    const result = mapArkResponse(payload)
+    outcome.ok = true
+    outcome.code = 'OK'
+    outcome.sources = result.sources.length
+    return result
   }
 
-  /** Append the request record to the audit file; a logging failure must never fail the search. */
-  record(endpoint, options, body) {
+  /** Append one audit line per attempt; a logging failure must never fail the search. */
+  record(endpoint, options, outcome, startedAt) {
     try {
       const line = JSON.stringify({
         time: Date.now(),
         endpoint,
         model: options.model,
         maxKeyword: options.maxKeyword,
-        tools: body.tools,
+        ok: outcome.ok,
+        code: outcome.code,
+        ...(typeof outcome.sources === 'number' ? { sources: outcome.sources } : {}),
+        elapsedMs: Date.now() - startedAt,
       })
       appendFileSync(AUDIT_FILE, `${line}\n`, { encoding: 'utf8' })
     } catch {
@@ -353,16 +408,111 @@ function readRowConfig(config) {
 }
 
 /**
+ * Defensively read the web seam's current search-provider selection.
+ *
+ * `@deepseek-ai/dsh-web` (0.2.x) ships no observation API, but the service
+ * instance keeps the selection state as plain public fields: `config.
+ * searchProvider` (reactive), `searchProviderEnv`, and the `searchProviders`
+ * registry Map. This reads them duck-typed and returns `null`s on any shape
+ * change, so a future harness rename degrades to "unknown", never to a crash.
+ */
+export function readSeamSelection(seam) {
+  try {
+    const configured = seam?.config?.searchProvider
+    const configuredId = typeof configured?.get === 'function' ? configured.get() : undefined
+    const envId = typeof seam?.searchProviderEnv === 'string' && seam.searchProviderEnv.length > 0 ? seam.searchProviderEnv : undefined
+    const registeredIds = seam?.searchProviders instanceof Map ? [...seam.searchProviders.keys()] : null
+    return { configuredId: configuredId ?? envId ?? null, registeredIds }
+  } catch {
+    return { configuredId: null, registeredIds: null }
+  }
+}
+
+/**
+ * Whether `ark-official` is (or will be) the provider the seam resolves for a
+ * search. `null` means unknowable: the id is unset and other providers are (or
+ * may be) registered, so auto-selection depends on their runtime availability.
+ */
+export function computeSelected(configuredId, registeredIds, selfAvailable) {
+  if (typeof configuredId === 'string' && configuredId.length > 0) return configuredId === SEARCH_PROVIDER_ID
+  if (registeredIds === null || !selfAvailable) return registeredIds !== null ? false : null
+  return registeredIds.length === 1 ? true : null
+}
+
+/**
+ * Locate profile `cordis.patch.yml` candidates so the activation snippet can
+ * name an exact file. A read-only or unusual home simply yields an empty list.
+ */
+export function findProfilePatchFiles(home = homedir()) {
+  const profilesDir = join(home, '.dsh', 'profiles')
+  try {
+    return readdirSync(profilesDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(profilesDir, entry.name, 'cordis.patch.yml'))
+      .filter((path) => existsSync(path))
+  } catch {
+    return []
+  }
+}
+
+/**
  * Register the Ark search provider with `ctx.web`, plus the Plugins-card HTTP
  * surface. Options are re-resolved on every search so saving from the card
  * takes effect immediately (no Host restart).
+ *
+ * Also logs a loud warning when the seam's selection does not (yet) point at
+ * this provider: mounting is not activation, and 1.1.0 kept that invisible.
  */
 export function apply(ctx, config) {
   const getOptions = () => normalizeOptions(effectiveSettings(readRowConfig(config)))
   const provider = new ArkSearchProvider(ctx, getOptions)
   ctx.web.registerSearchProvider(provider)
+
+  const warn = (message) => {
+    try {
+      ctx.logger?.warn?.(message)
+    } catch {
+      // A missing logger must not break registration.
+    }
+  }
+  const { configuredId, registeredIds } = readSeamSelection(ctx.web)
+  if (configuredId === null) {
+    warn(
+      `dsh-web-search-ark mounted but web.searchProvider is unset — searches use Ark only if it is the single usable provider. Add "config: { searchProvider: ark-official }" to the web row to activate.`,
+    )
+  } else if (configuredId !== SEARCH_PROVIDER_ID) {
+    warn(
+      `dsh-web-search-ark mounted but web.searchProvider is "${configuredId}" — searches will NOT use Ark until selected. See the plugin README ("激活").`,
+    )
+  } else if (registeredIds !== null && !provider.available()) {
+    warn(`web.searchProvider selects ${SEARCH_PROVIDER_ID} but the provider is currently unavailable — check the Ark credentials or baseURL config.`)
+  }
+
+  const checkKey = async () => {
+    try {
+      await resolveApiKey(ctx, getOptions())
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, reason: String(error?.message ?? error) }
+    }
+  }
+  const getStatus = () => {
+    const options = getOptions()
+    const selection = readSeamSelection(ctx.web)
+    return {
+      mounted: true,
+      providerId: SEARCH_PROVIDER_ID,
+      configuredSearchProvider: selection.configuredId,
+      registeredSearchProviders: selection.registeredIds,
+      selected: computeSelected(selection.configuredId, selection.registeredIds, provider.available()),
+      available: provider.available(),
+      patchFiles: findProfilePatchFiles(),
+    }
+  }
   registerRoutes(ctx, {
     getConfig: getOptions,
+    checkKey,
+    getStatus,
     probe: (query) => provider.search({ query, maxResults: 3 }),
   })
 }
