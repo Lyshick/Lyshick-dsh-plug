@@ -38,6 +38,7 @@
 
 import { inflateRawSync } from 'node:zlib'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -45,7 +46,7 @@ import { dirname, join } from 'node:path'
 export const name = 'spec-inspect'
 
 /** Package version shown by the page. */
-export const VERSION = '0.1.0'
+export const VERSION = '0.2.0'
 
 /** HTTP prefix owned by this plugin. */
 export const ROUTE_PREFIX = '/spec-inspect'
@@ -696,6 +697,23 @@ function writeSettingsFile(patch) {
 // Prompt
 // ---------------------------------------------------------------------------
 
+/**
+ * A complete UserMessage for `agent.followup`.
+ *
+ * `Agent.followup` does not fill in `id`/`role`: it queues the object and the
+ * loop appends it verbatim as a `user/message` event. The Chat projection keys
+ * on those fields, so a bare `{ content, source }` produces an event the UI
+ * silently skips (the user never sees the message). Always send a full message.
+ */
+export function userMessage(text) {
+  return {
+    id: randomUUID(),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  }
+}
+
 export function buildPrompt({ channel, doc, text }) {
   const body = text.length > TEXT_CAP
     ? `${text.slice(0, TEXT_CAP)}\n\n[文档过长，已截断到 ${TEXT_CAP} 字符；请基于以上内容检视]`
@@ -749,6 +767,254 @@ export function buildPrompt({ channel, doc, text }) {
     '## 待确认',
     '没有则写“无”。',
   ].join('\n')
+}
+
+// ---------------------------------------------------------------------------
+// Inspection report parsing
+// ---------------------------------------------------------------------------
+
+/** Stable identity of one applied fix, so a reloaded page still shows it. */
+function fixKey(sessionId, item) {
+  return [
+    String(sessionId),
+    String(item?.path ?? ''),
+    String(item?.line ?? ''),
+    String(item?.endLine ?? ''),
+    String(item?.fix ?? '').slice(0, 160),
+  ].join('|')
+}
+
+/** Applied-fix records kept in the settings file; older entries are trimmed. */
+const APPLIED_CAP = 300
+
+/**
+ * Parse the Assistant's Markdown inspection report into
+ * `{ groups: [{ level, items: [{ path, line, endLine, issue, ... }] }] }`.
+ *
+ * The prompt fixes the heading and field names, but models still vary:
+ * `**位置**` vs `位置`, full-width vs half-width colons, extra fields such as
+ * `分类` / `原因`, and several `## P1 问题` sections. The parser tolerates all
+ * of them; it returns `undefined` when the text is not an inspection report.
+ */
+export function parseReport(text) {
+  if (typeof text !== 'string' || text.trim().length === 0) return undefined
+  const lines = text.replace(/\r\n?/g, '\n').split('\n')
+  const groups = []
+  let currentGroup
+  let entry
+  let lastField
+  let section = ''
+  let conclusion = ''
+  let scope = ''
+  let sawReport = false
+
+  const closeEntry = () => {
+    if (entry !== undefined && currentGroup !== undefined && (entry.path !== undefined || entry.issue !== undefined)) {
+      currentGroup.items.push(entry)
+    }
+    entry = undefined
+    lastField = undefined
+  }
+  const closeGroup = () => {
+    closeEntry()
+    currentGroup = undefined
+  }
+  const startEntry = () => {
+    entry = {}
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/[ \t]+$/, '')
+    if (line.trim().length === 0) {
+      lastField = undefined
+      continue
+    }
+
+    const headingBody = line
+      .replace(/^\s*(?:#{1,6}\s+|\*\*\s*)/, '')
+      .replace(/^\s*\*\*\s*/, '')
+      .replace(/\s*\*\*\s*$/, '')
+      .trim()
+    const isHeadingLine = /^\s*(?:#{1,6}\s+|\*\*\s*)/.test(line)
+
+    const levelMatch = /^P([0-5])\s*(?:问题)?(?:\s*[：:].*)?$/.exec(headingBody)
+    if (levelMatch !== null && (isHeadingLine || /^P[0-5]\s*问题$/.test(headingBody))) {
+      closeGroup()
+      section = 'problems'
+      sawReport = true
+      const level = `P${levelMatch[1]}`
+      currentGroup = groups.find((group) => group.level === level)
+      if (currentGroup === undefined) {
+        currentGroup = { level, items: [] }
+        groups.push(currentGroup)
+      }
+      continue
+    }
+
+    const sectionMatch = /^(?:[一二三四五六七八九十]+、\s*)?(检视结论|检视范围|级别汇总|汇总|待确认|附录|统计)(?:\s*(?:说明|问题))?$/.exec(headingBody)
+    if (sectionMatch !== null && (isHeadingLine || headingBody.length >= 2)) {
+      closeGroup()
+      sawReport = true
+      const name = sectionMatch[1]
+      section = name === '检视结论' ? 'conclusion' : name === '检视范围' ? 'scope' : 'other'
+      continue
+    }
+
+    if (section === 'problems' && currentGroup !== undefined) {
+      const fieldMatch = /^\s*[-*+]\s+(?:\*\*)?([^*：:\n]{1,12}?)(?:\*\*)?\s*[：:]\s*(.*)$/.exec(line)
+      if (fieldMatch !== null) {
+        const key = normalizeField(fieldMatch[1])
+        const value = fieldMatch[2].trim()
+        if (key === 'location' || key === 'category') {
+          if (entry !== undefined && (entry.path !== undefined || entry.issue !== undefined)) closeEntry()
+          if (entry === undefined) startEntry()
+        }
+        if (entry === undefined) startEntry()
+        lastField = key
+        if (key === 'location') {
+          const location = parseLocation(value)
+          if (location !== undefined) {
+            entry.path = location.path
+            entry.line = location.line
+            if (location.endLine !== undefined) entry.endLine = location.endLine
+          } else {
+            entry.locationRaw = value
+          }
+        } else if (key === 'issue') {
+          entry.issue = value
+        } else if (key === 'reason') {
+          entry.reason = value
+        } else if (key === 'basis') {
+          entry.basis = value
+        } else if (key === 'risk') {
+          entry.risk = value
+        } else if (key === 'fix') {
+          entry.fix = value
+        } else if (key === 'category') {
+          entry.category = value
+        } else if (key === 'level') {
+          entry.level = value
+        } else if (key.length > 0) {
+          entry[key] = value
+        }
+        continue
+      }
+      if (entry !== undefined && lastField !== undefined && lastField !== 'location' && lastField !== 'category') {
+        entry[lastField] = `${entry[lastField] ?? ''} ${line.trim()}`.trim()
+      }
+      continue
+    }
+
+    if (section === 'conclusion') conclusion = `${conclusion}${conclusion.length > 0 ? '\n' : ''}${line.trim()}`
+    else if (section === 'scope') scope = `${scope}${scope.length > 0 ? '\n' : ''}${line.trim()}`
+  }
+
+  closeGroup()
+  if (!sawReport) return undefined
+  return { groups, conclusion: conclusion.trim(), scope: scope.trim() }
+}
+
+function normalizeField(key) {
+  const cleaned = String(key).replace(/\*\*/g, '').trim().toLowerCase()
+  if (['位置', '文件', '文件位置', '行号', 'location', 'path'].includes(cleaned)) return 'location'
+  if (['问题', '问题描述', '现象', 'issue'].includes(cleaned)) return 'issue'
+  if (['原因', '成因', 'reason'].includes(cleaned)) return 'reason'
+  if (['规范依据', '依据', '规范', 'basis'].includes(cleaned)) return 'basis'
+  if (['风险', '影响', 'risk'].includes(cleaned)) return 'risk'
+  if (['修复建议', '修改建议', '修复方案', '建议', '修复', 'fix'].includes(cleaned)) return 'fix'
+  if (['分类', 'category'].includes(cleaned)) return 'category'
+  if (['级别', 'level'].includes(cleaned)) return 'level'
+  return cleaned
+}
+
+/** Pull `path:line` (optionally `path:line-end`) out of one location value. */
+function parseLocation(value) {
+  const text = String(value ?? '').trim()
+  if (text.length === 0) return undefined
+  const fenced = Array.from(text.matchAll(/`([^`]+)`/g), (match) => match[1])
+  const candidates = fenced.length > 0 ? [...fenced, text] : [text]
+  for (const candidate of candidates) {
+    const cleaned = candidate.replace(/[（(][^）)]*[）)]/g, '').trim()
+    const strict = /^(.*?):(\d+)(?:[-–~](\d+))?$/.exec(cleaned)
+    if (strict !== null && strict[1].trim().length > 0) {
+      return {
+        path: strict[1].trim(),
+        line: Number(strict[2]),
+        endLine: strict[3] !== undefined ? Number(strict[3]) : undefined,
+      }
+    }
+    const loose = /([A-Za-z0-9_./\\\-\u4e00-\u9fff]+):(\d+)(?:[-–~](\d+))?/.exec(cleaned)
+    if (loose !== null) {
+      return {
+        path: loose[1],
+        line: Number(loose[2]),
+        endLine: loose[3] !== undefined ? Number(loose[3]) : undefined,
+      }
+    }
+  }
+  return undefined
+}
+
+/** Concatenate the text blocks of one Assistant message. */
+function messageText(message) {
+  const content = message?.content
+  if (!Array.isArray(content)) return ''
+  const parts = []
+  for (const block of content) {
+    if (block?.type === 'text' && typeof block.text === 'string' && block.text.length > 0) parts.push(block.text)
+  }
+  return parts.join('\n')
+}
+
+/**
+ * Find the newest inspection report in one Session's event log.
+ * @returns `{ state: 'ready', report, at }` or `{ state: 'pending' }`.
+ */
+export function latestReport(ctx, sessionId, sinceSeq) {
+  const sessions = ctx.get('sessions')
+  const session = sessions?.get?.(sessionId)
+  if (session === undefined || typeof session.snapshotEvents !== 'function') {
+    throw new SpecError('no_session', '未找到目标会话：请先打开一个会话再开始检视')
+  }
+  const from = Number.isInteger(sinceSeq) && sinceSeq >= 0 ? sinceSeq : 0
+  const events = session.snapshotEvents(from)
+  let latest
+  for (const event of events) {
+    if (event?.type !== 'assistant/message') continue
+    const text = messageText(event.data?.message)
+    if (text.length === 0) continue
+    if (!/##\s*P[0-5]|##\s*检视结论|##\s*级别汇总/.test(text)) continue
+    const report = parseReport(text)
+    if (report === undefined) continue
+    latest = { report, at: event.time, seq: event.seq }
+  }
+  if (latest === undefined) return { state: 'pending' }
+  return { state: 'ready', report: latest.report, at: latest.at, seq: latest.seq }
+}
+
+/** One user message that asks the Session's Agent to apply one finding. */
+export function buildFixPrompt(item) {
+  const path = String(item?.path ?? '').trim()
+  const line = Number(item?.line)
+  if (path.length === 0 || !Number.isFinite(line) || line <= 0) {
+    throw new SpecError('bad_fix_target', '修复目标缺少有效的文件路径或行号')
+  }
+  const endLine = Number(item?.endLine)
+  const location = Number.isFinite(endLine) && endLine > line ? `${path}:${line}-${endLine}` : `${path}:${line}`
+  const fix = String(item?.fix ?? '').trim()
+  if (fix.length === 0) throw new SpecError('no_fix', '该问题没有可应用的修复建议')
+  const parts = [
+    '请应用下面这条检视修复建议，并直接修改代码。',
+    '',
+    `位置：\`${location}\``,
+  ]
+  if (typeof item.issue === 'string' && item.issue.trim().length > 0) parts.push(`问题：${item.issue.trim()}`)
+  if (typeof item.reason === 'string' && item.reason.trim().length > 0) parts.push(`原因：${item.reason.trim()}`)
+  if (typeof item.basis === 'string' && item.basis.trim().length > 0) parts.push(`规范依据：${item.basis.trim()}`)
+  if (typeof item.risk === 'string' && item.risk.trim().length > 0) parts.push(`风险：${item.risk.trim()}`)
+  parts.push(`修复建议：${fix}`)
+  parts.push('', '要求：先读取该文件的相关上下文，只做必要修改并保持现有代码风格；不要改无关文件；修改完成后简述每个改动点。')
+  return parts.join('\n')
 }
 
 // ---------------------------------------------------------------------------
@@ -862,7 +1128,7 @@ function registerRoutes(ctx, state, readIndex) {
             }
             if (pathname === `${ROUTE_PREFIX}/start` && req.method === 'POST') {
               const body = await readJsonBody(req)
-              const { agent, docId } = startInspection(ctx, body)
+              const { agent, docId, sessionId } = startInspection(ctx, body)
               let index = await readIndex(false)
               let found = findDoc(index, docId)
               if (found === undefined) {
@@ -874,10 +1140,10 @@ function registerRoutes(ctx, state, readIndex) {
               const text = documentText(bytes, found.doc.type, found.doc.url)
               if (text.trim().length === 0) throw new SpecError('empty_doc', `文档没有可读文本：${found.doc.url}`)
               const prompt = buildPrompt({ channel: found.channel.name, doc: found.doc, text })
-              agent.followup({
-                content: [{ type: 'text', text: prompt }],
-                source: { kind: 'user' },
-              })
+              const sessions = ctx.get('sessions')
+              const session = sessions?.get?.(sessionId)
+              const startSeq = session !== undefined ? Number(session.seq) : 0
+              agent.followup(userMessage(prompt))
               return json(res, 200, {
                 ok: true,
                 value: {
@@ -885,8 +1151,63 @@ function registerRoutes(ctx, state, readIndex) {
                   channel: found.channel.name,
                   docId: found.doc.id,
                   chars: text.length,
+                  startSeq,
                 },
               })
+            }
+            if (pathname === `${ROUTE_PREFIX}/report` && req.method === 'GET') {
+              const url = new URL(req.url ?? '/', 'http://x')
+              const sessionId = (url.searchParams.get('sessionId') ?? '').trim()
+              if (sessionId.length === 0) throw new SpecError('missing_session', '缺少 sessionId 参数')
+              const sinceRaw = url.searchParams.get('sinceSeq')
+              const sinceSeq = sinceRaw !== null && /^\d+$/.test(sinceRaw) ? Number(sinceRaw) : undefined
+              const found = latestReport(ctx, sessionId, sinceSeq)
+              const markApplied = (item) => (state.applied.has(fixKey(sessionId, item)) ? { ...item, applied: true } : item)
+              return json(res, 200, {
+                ok: true,
+                value: found.state === 'ready'
+                  ? {
+                      state: 'ready',
+                      groups: found.report.groups.map((group) => ({
+                        level: group.level,
+                        items: group.items.map(markApplied),
+                      })),
+                      conclusion: found.report.conclusion,
+                      scope: found.report.scope,
+                      finishedAt: found.at,
+                      seq: found.seq,
+                    }
+                  : { state: 'pending', groups: [], conclusion: '', scope: '' },
+              })
+            }
+            if (pathname === `${ROUTE_PREFIX}/apply` && req.method === 'POST') {
+              const body = await readJsonBody(req)
+              const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : ''
+              if (sessionId.length === 0) throw new SpecError('missing_session', '缺少 sessionId 参数')
+              if (body?.item === null || typeof body?.item !== 'object') {
+                throw new SpecError('bad_request', '缺少 item 参数')
+              }
+              const prompt = buildFixPrompt(body.item)
+              if (prompt.length > 20_000) throw new SpecError('too_large', '修复请求过长')
+              const agents = ctx.get('agents')
+              const agent = agents?.get?.(sessionId)
+              if (agent === undefined || typeof agent.followup !== 'function') {
+                throw new SpecError('no_session', '未找到目标会话：请先打开一个会话')
+              }
+              await agent.followup(userMessage(prompt))
+              state.applied.set(fixKey(sessionId, body.item), Date.now())
+              if (state.applied.size > APPLIED_CAP) {
+                const oldest = [...state.applied.entries()]
+                  .sort((a, b) => a[1] - b[1])
+                  .slice(0, state.applied.size - APPLIED_CAP)
+                for (const [key] of oldest) state.applied.delete(key)
+              }
+              try {
+                writeSettingsFile({ applied: Object.fromEntries(state.applied) })
+              } catch {
+                /* best-effort: the in-memory mark still covers this process */
+              }
+              return json(res, 200, { ok: true, value: { sent: true, applied: true, prompt } })
             }
             return json(res, 404, { ok: false, error: { code: 'not_found', message: 'not found' } })
           } catch (error) {
@@ -917,9 +1238,17 @@ export function apply(ctx, config) {
   const state = {
     indexUrl: typeof fileSettings.indexUrl === 'string' ? fileSettings.indexUrl.trim() : '',
     rowIndexUrl,
+    /** fixKey → applied time; persisted under `applied` in the settings file. */
+    applied: new Map(),
     currentIndexUrl() {
       return this.indexUrl.length > 0 ? this.indexUrl : this.rowIndexUrl
     },
+  }
+  const savedApplied = fileSettings.applied
+  if (savedApplied !== null && typeof savedApplied === 'object' && !Array.isArray(savedApplied)) {
+    for (const [key, at] of Object.entries(savedApplied)) {
+      if (key.length > 0) state.applied.set(key, Number(at) || 0)
+    }
   }
 
   let cache = { url: '', at: 0, data: null }

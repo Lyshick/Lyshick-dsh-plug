@@ -1,9 +1,9 @@
 {
   "name": "dsh-spec-inspect",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Spec Inspect: pick a company HTML business-spec document (Markdown, Word .doc/.docx) from a JSON index source, then let the AI inspect the current workspace and list findings under the document's P0-P5 levels.",
+  "description": "Spec Inspect: pick a company HTML business-spec document (Markdown, Word .doc/.docx) from a JSON index source, then let the AI inspect the current workspace. Findings are listed in the right Sidebar under the document's own P0-P5 levels, each with reveal-in-file and apply-fix actions.",
   "license": "MIT",
   "icon": "./icon.svg",
   "main": "index.js",

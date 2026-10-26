@@ -5,7 +5,7 @@
  *   node plugins/dsh-spec-inspect/_selftest.mjs
  */
 import assert from 'node:assert/strict'
-import { normalizeIndex, documentText, buildPrompt } from './index.js'
+import { normalizeIndex, documentText, buildPrompt, parseReport, buildFixPrompt, userMessage } from './index.js'
 
 function zipStore(files) {
   const locals = []
@@ -129,6 +129,81 @@ check('prompt carries the document and the P0-P5 contract', () => {
   assert.match(prompt, /P0-P5/)
   assert.match(prompt, /只做检视，不修改任何文件/)
   assert.match(prompt, /规范依据/)
+})
+
+check('report parser extracts level groups, locations, and fixes', () => {
+  const report = parseReport([
+    '## 检视结论',
+    '发现 2 个 P1。',
+    '',
+    '## P0 问题',
+    '无',
+    '',
+    '## P1 问题',
+    '',
+    '- 分类：代码 bug 检视（第一部分）',
+    '- 级别：P1',
+    '- 位置：`js/game.js:124-140`（checkMatches 内）',
+    '- 问题：级联消除被重复结算。',
+    '- 原因：每个棋子各挂一个定时器。',
+    '- 规范依据：第一部分「异步时序问题」。',
+    '- 风险：分数虚高。',
+    '- 修复建议：整批消除只调度一次结算。',
+    '',
+    '- 位置：`js/game.js:65-70`',
+    '- 问题：交换合法性判定不完整。',
+    '- 修复建议：补充边界判定。',
+    '',
+    '## 级别汇总',
+    '| 级别 | 数量 |',
+    '| P1 | 2 |',
+    '',
+    '## 待确认',
+    '无',
+  ].join('\n'))
+  assert.ok(report !== undefined)
+  assert.equal(report.conclusion, '发现 2 个 P1。')
+  assert.deepEqual(report.groups.map((group) => group.level), ['P0', 'P1'])
+  const p1 = report.groups[1].items
+  assert.equal(p1.length, 2)
+  assert.equal(p1[0].path, 'js/game.js')
+  assert.equal(p1[0].line, 124)
+  assert.equal(p1[0].endLine, 140)
+  assert.equal(p1[0].fix, '整批消除只调度一次结算。')
+  assert.equal(p1[1].line, 65)
+  assert.equal(p1[1].fix, '补充边界判定。')
+  assert.equal(report.groups[0].items.length, 0)
+})
+
+check('report parser ignores text that is not an inspection report', () => {
+  assert.equal(parseReport('这是一段普通的回答，没有任何级别标题。'), undefined)
+  const bold = parseReport('### **P2 问题**\n\n- **位置**：`src/a.vue:3`\n- **问题**：缺少 key。\n- **修复建议**：补 key。')
+  assert.equal(bold.groups[0].level, 'P2')
+  assert.equal(bold.groups[0].items[0].line, 3)
+})
+
+check('fix prompt targets one location and demands a scoped edit', () => {
+  const prompt = buildFixPrompt({
+    path: 'js/game.js',
+    line: 124,
+    endLine: 140,
+    issue: '级联消除被重复结算。',
+    basis: '异步时序问题',
+    fix: '整批消除只调度一次结算。',
+  })
+  assert.match(prompt, /js\/game\.js:124-140/)
+  assert.match(prompt, /整批消除只调度一次结算/)
+  assert.match(prompt, /只做必要修改/)
+  assert.throws(() => buildFixPrompt({ path: 'a.js', line: 1 }), /没有可应用的修复建议/)
+  assert.throws(() => buildFixPrompt({ fix: 'x' }), /缺少有效的文件路径/)
+})
+
+check('followup message carries id and role so Chat renders it', () => {
+  const message = userMessage('hello')
+  assert.equal(message.role, 'user')
+  assert.match(message.id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+  assert.deepEqual(message.content, [{ type: 'text', text: 'hello' }])
+  assert.deepEqual(message.source, { kind: 'user' })
 })
 
 console.log(`\n${passed} checks passed`)
