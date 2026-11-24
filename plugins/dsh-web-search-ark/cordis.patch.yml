@@ -1,11 +1,13 @@
 # dsh bundle layer: mount the dsh-web-search-ark provider.
 #
 # The row config (defaults, overridable from the profile's cordis.patch.yml):
+#   preset      backend defaults: ark (default) | qwen | custom
 #   apiKeyEnv   comma-separated credential refs tried in order
-#               (default ARK_API_KEY,HUOSHAN_API_KEY,ATEST_API_KEY)
-#   baseURL     Ark Responses-API base; "/responses" is appended
+#               (ark: ARK_API_KEY,HUOSHAN_API_KEY,ATEST_API_KEY
+#                qwen: QIANWEN_AI_API_KEY,DASHSCOPE_API_KEY)
+#   baseURL     Responses-API base; "/responses" is appended
 #   model       model id that runs the search sub-task (must support web_search)
-#   maxKeyword  max keyword searches one round may fan out to (Ark allows 1-50)
+#   maxKeyword  max keyword searches one round may fan out to (Ark only, 1-50)
 #   timeoutMs   per-search timeout
 #
 # Mounting does NOT select the provider. Activate with:

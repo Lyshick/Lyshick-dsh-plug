@@ -1,7 +1,7 @@
 {
   "name": "dsh-web-search-ark",
-  "version": "1.2.0",
-  "description": "Volcengine Ark (火山方舟) web-search provider for DeepSeek Harness: routes the built-in web_search capability through the Ark Responses API native 联网内容插件 (web_search tool), with a configuration card in the sidebar Plugins page.",
+  "version": "1.3.0",
+  "description": "OpenAI Responses-style web-search provider for DeepSeek Harness (Volcengine Ark, Qwen Token Plan, or any compatible endpoint): routes the built-in web_search capability through the backend's native web_search tool, with a configuration card in the sidebar Plugins page.",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -25,7 +25,10 @@
     "web-search",
     "volcengine",
     "ark",
-    "doubao"
+    "doubao",
+    "qwen",
+    "dashscope",
+    "responses-api"
   ],
   "license": "MIT",
   "repository": {

@@ -17,7 +17,7 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } fr
 import { dirname, join } from 'node:path'
 
 /** Fields the card may write. Keeping this list tight prevents junk keys. */
-export const EDITABLE_FIELDS = ['apiKey', 'apiKeyEnv', 'baseURL', 'model', 'maxKeyword', 'timeoutMs']
+export const EDITABLE_FIELDS = ['preset', 'apiKey', 'apiKeyEnv', 'baseURL', 'model', 'maxKeyword', 'timeoutMs']
 
 /** Absolute path of the JSON layer. */
 export function settingsFile() {

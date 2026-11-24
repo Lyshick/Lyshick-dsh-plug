@@ -51,20 +51,52 @@ export const inject = ['web']
  */
 const AUDIT_FILE = process.env.DSH_WEB_SEARCH_ARK_AUDIT_FILE ?? join(homedir(), '.dsh', 'web-search-ark.audit.jsonl')
 
-/** Default Ark Responses-API base. `/responses` is appended. */
-const DEFAULT_BASE_URL = 'https://ark.cn-beijing.volces.com/api/plan/v3'
-
-/** Default model that runs the search sub-task on this deployment. */
-const DEFAULT_MODEL = 'deepseek-v4-1-flash-261017'
-
 /**
- * Credential references tried in order (credentials service first, then the
- * launching environment); the first resolvable wins. `ARK_API_KEY` is the name
- * Volcengine's own docs use; `HUOSHAN_API_KEY` covers deployments where the
- * Ark key is shared with the chat route; `ATEST_API_KEY` keeps 1.1.0 setups
- * working. Override with a comma-separated `apiKeyEnv` in the config.
+ * Backend presets for the OpenAI-style Responses `web_search` tool.
+ *
+ * Ark and Qwen expose the SAME protocol — `POST {base}/responses` with
+ * `tools: [{ type: 'web_search' }]`, answering with `web_search_call` items
+ * whose `action.sources[]` carry the links. They differ only in the base URL,
+ * the model id, the credential names, and whether the request accepts Ark's
+ * extra knobs (`max_keyword`, `include`).
+ *
+ * A preset supplies DEFAULTS only: any field the user configures explicitly
+ * (row config or `~/.dsh/web-search-ark.json`) wins over it.
  */
-const DEFAULT_API_KEY_ENVS = ['ARK_API_KEY', 'HUOSHAN_API_KEY', 'ATEST_API_KEY']
+export const PRESETS = {
+  ark: {
+    label: 'Volcengine Ark',
+    baseURL: 'https://ark.cn-beijing.volces.com/api/plan/v3',
+    model: 'deepseek-v4-1-flash-261017',
+    apiKeyEnvs: ['ARK_API_KEY', 'HUOSHAN_API_KEY', 'ATEST_API_KEY'],
+    supportsMaxKeyword: true,
+    includeSources: true,
+  },
+  qwen: {
+    // Qwen Token Plan endpoint; verified working with the `token-plan.` host.
+    // The public docs show the same host without that prefix.
+    label: 'Qwen (Token Plan)',
+    baseURL: 'https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1',
+    model: 'deepseek-v4.1-flash-1017',
+    apiKeyEnvs: ['QIANWEN_AI_API_KEY', 'DASHSCOPE_API_KEY'],
+    // Qwen has no keyword budget and returns `action.sources` unprompted, so
+    // neither `max_keyword` nor `include` is sent.
+    supportsMaxKeyword: false,
+    includeSources: false,
+  },
+  custom: {
+    // Any OpenAI-compatible Responses endpoint: baseURL and model are required.
+    label: 'Custom (OpenAI-compatible)',
+    baseURL: '',
+    model: '',
+    apiKeyEnvs: ['ARK_API_KEY', 'HUOSHAN_API_KEY', 'ATEST_API_KEY'],
+    supportsMaxKeyword: true,
+    includeSources: true,
+  },
+}
+
+/** Preset used when the config names none (keeps 1.x Ark deployments working). */
+export const DEFAULT_PRESET = 'ark'
 
 /** Default upper bound on keyword searches per round (Ark allows 1-50). */
 const DEFAULT_MAX_KEYWORD = 5
@@ -73,7 +105,7 @@ const DEFAULT_MAX_KEYWORD = 5
 const DEFAULT_TIMEOUT_MS = 120_000
 
 /** Attribution header sent on every request. */
-const USER_AGENT = 'dsh-web-search-ark/1.0.0'
+const USER_AGENT = 'dsh-web-search-ark/1.3.0'
 
 /**
  * Error carrying the seam's machine-routable `code`. `@deepseek-ai/dsh-web`'s
@@ -101,10 +133,16 @@ function credentialRef(value) {
 }
 
 /** Normalize a string ("A,B") or array credential reference into a list. */
-function credentialRefs(value) {
+function credentialRefs(value, fallback) {
   const list = Array.isArray(value) ? value : String(value ?? '').split(',')
   const refs = list.map(credentialRef).filter((ref) => ref.length > 0)
-  return refs.length > 0 ? refs : [...DEFAULT_API_KEY_ENVS]
+  return refs.length > 0 ? refs : [...(fallback ?? PRESETS[DEFAULT_PRESET].apiKeyEnvs)]
+}
+
+/** Resolve a preset id to a known preset, falling back to the default. */
+export function resolvePreset(value) {
+  const id = String(value ?? '').trim().toLowerCase()
+  return Object.prototype.hasOwnProperty.call(PRESETS, id) ? id : DEFAULT_PRESET
 }
 
 /** Strip trailing slashes so a base URL can be joined with a path suffix. */
@@ -129,27 +167,46 @@ function isKeywordCount(value) {
 
 /** Coerce one config section into fully-defaulted options. */
 function normalizeOptions(config) {
+  const presetId = resolvePreset(read(config, 'preset'))
+  const preset = PRESETS[presetId]
   const maxKeyword = Number(read(config, 'maxKeyword'))
   const timeoutMs = Number(read(config, 'timeoutMs'))
   return {
+    preset: presetId,
+    supportsMaxKeyword: preset.supportsMaxKeyword,
+    includeSources: preset.includeSources,
     apiKey: read(config, 'apiKey'),
-    apiKeyEnvs: credentialRefs(read(config, 'apiKeyEnv')),
-    baseURL: String(read(config, 'baseURL') ?? '').trim() || DEFAULT_BASE_URL,
-    model: String(read(config, 'model') ?? '').trim() || DEFAULT_MODEL,
+    apiKeyEnvs: credentialRefs(read(config, 'apiKeyEnv'), preset.apiKeyEnvs),
+    baseURL: String(read(config, 'baseURL') ?? '').trim() || preset.baseURL,
+    model: String(read(config, 'model') ?? '').trim() || preset.model,
     maxKeyword: Number.isInteger(maxKeyword) && maxKeyword >= 1 && maxKeyword <= 50 ? maxKeyword : DEFAULT_MAX_KEYWORD,
     timeoutMs: Number.isInteger(timeoutMs) && timeoutMs >= 1000 ? timeoutMs : DEFAULT_TIMEOUT_MS,
   }
 }
 
+/** Best-effort human label for a link whose backend returned no title. */
+function hostnameOf(value) {
+  try {
+    return new URL(String(value)).hostname || undefined
+  } catch {
+    return undefined
+  }
+}
+
 /**
- * Build the normalized source list from one Ark Responses payload.
+ * Build the normalized source list from one Responses payload.
  *
- * `web_search_call.action.sources` is present only when the deployment returns
- * it; `include` asks for it, but the authoritative citation carrier is the
- * `url_citation` annotation list on each `output_text` block. Both are read and
- * deduplicated by URL. The annotation wins because it carries `summary`, the
- * long excerpt Ark recommends for LLM consumption (its `snippet` equivalent is
- * documented as unsuitable for models).
+ * Two carriers are read, because the supported backends differ:
+ *
+ * - `web_search_call.action.sources[]` — the primary carrier. Ark returns it
+ *   (asked for via `include`), Qwen returns it unconditionally. Ark fills
+ *   title / site_name / summary / publish_time; Qwen fills `url` only.
+ * - `output_text.annotations[]` with `type: 'url_citation'` — Ark's richer
+ *   carrier, which also holds `summary` (the long excerpt Ark recommends for
+ *   LLM consumption). Qwen's Responses API emits no citations at all.
+ *
+ * Both are deduplicated by URL. When a backend supplies neither title nor site
+ * name, the URL hostname is used so the tool result is not a bare link list.
  *
  * @param payload - parsed Responses body.
  * @returns deduplicated sources in first-seen order.
@@ -167,7 +224,7 @@ export function mapArkResponse(payload) {
         ? title
         : typeof siteName === 'string' && siteName.length > 0
           ? siteName
-          : undefined
+          : hostnameOf(url)
     // Ark emits the epoch as its "no date" placeholder; surfacing 1970 would
     // rank stale pages as fresh in the tool result.
     const dated =
@@ -214,7 +271,7 @@ export function mapArkResponse(payload) {
 
   if (sources.length === 0) {
     throw new ArkSearchError(
-      'Ark returned no web-search citations. Confirm the 联网内容插件 (web search plugin) is enabled for this account and that the configured model supports the web_search tool.',
+      'The search backend returned no citations. Confirm its web_search tool is enabled for this account and that the configured model supports it (Ark: 联网内容插件; Qwen: Responses web_search tool).',
       'WEB_PROVIDER_ERROR',
     )
   }
@@ -246,13 +303,13 @@ async function resolveApiKey(ctx, options) {
     if (typeof ambient === 'string' && ambient.trim().length > 0) return ambient.trim()
   }
   throw new ArkSearchError(
-    `Ark search has no API key. Tried credential refs [${refs.join(', ')}] against the credentials service and the launching environment. ` +
+    `Web search has no API key. Tried credential refs [${refs.join(', ')}] against the credentials service and the launching environment. ` +
       `Store one in ~/.dsh/.credentials.yaml (under refs:), export it in the launching environment, or set a literal "apiKey" / a comma-separated "apiKeyEnv" in the web-search-ark config.`,
     'WEB_PROVIDER_CREDENTIAL_MISSING',
   )
 }
 
-/** The Ark-backed search provider. */
+/** The Responses-API web-search provider (Ark / Qwen / any compatible backend). */
 export class ArkSearchProvider {
   id = SEARCH_PROVIDER_ID
 
@@ -268,7 +325,10 @@ export class ArkSearchProvider {
 
   available() {
     const options = this.getConfig()
-    return isHttpUrl(options.baseURL) && isKeywordCount(options.maxKeyword)
+    // `maxKeyword` only matters for backends that accept it (Ark); Qwen has no
+    // keyword budget, so validating it there would report a false unavailability.
+    const keywordOk = !options.supportsMaxKeyword || isKeywordCount(options.maxKeyword)
+    return isHttpUrl(options.baseURL) && keywordOk
   }
 
   /**
@@ -299,23 +359,28 @@ export class ArkSearchProvider {
     if (!isHttpUrl(options.baseURL)) {
       outcome.code = 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE'
       throw new ArkSearchError(
-        `Ark search baseURL ${JSON.stringify(options.baseURL)} is not an absolute HTTP(S) URL`,
+        `Web search baseURL ${JSON.stringify(options.baseURL)} is not an absolute HTTP(S) URL`,
         'WEB_PROVIDER_CONFIGURED_UNAVAILABLE',
       )
     }
     const apiKey = await resolveApiKey(this.ctx, options)
-    if (signal?.aborted === true) throw new ArkSearchError('Ark search aborted', 'WEB_ABORTED')
+    if (signal?.aborted === true) throw new ArkSearchError('Web search aborted', 'WEB_ABORTED')
 
+    // Request shape follows the preset: `max_keyword` and `include` are Ark
+    // knobs. Qwen answers with `action.sources` unprompted and has no keyword
+    // budget, so sending either would be ignored at best and rejected at worst.
+    const tool = { type: 'web_search' }
+    if (options.supportsMaxKeyword) tool.max_keyword = options.maxKeyword
     const body = {
       model: options.model,
       input: `Search the web for: ${request.query}`,
-      tools: [{ type: 'web_search', max_keyword: options.maxKeyword }],
-      include: ['web_search_call.action.sources'],
+      tools: [tool],
     }
+    if (options.includeSources) body.include = ['web_search_call.action.sources']
 
     const controller = new AbortController()
     const timeout = setTimeout(() => {
-      controller.abort(new Error(`Ark search timed out after ${options.timeoutMs}ms`))
+      controller.abort(new Error(`Web search timed out after ${options.timeoutMs}ms`))
     }, options.timeoutMs)
     const onAbort = () => controller.abort(signal?.reason)
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -335,9 +400,9 @@ export class ArkSearchProvider {
         signal: controller.signal,
       })
     } catch (error) {
-      if (signal?.aborted === true) throw new ArkSearchError('Ark search aborted', 'WEB_ABORTED', { cause: error })
+      if (signal?.aborted === true) throw new ArkSearchError('Web search aborted', 'WEB_ABORTED', { cause: error })
       throw new ArkSearchError(
-        `Ark search request to ${JSON.stringify(endpoint)} failed: ${String(error)}`,
+        `Web search request to ${JSON.stringify(endpoint)} failed: ${String(error)}`,
         'WEB_PROVIDER_ERROR',
         { cause: error },
       )
@@ -355,7 +420,7 @@ export class ArkSearchProvider {
         // A non-JSON error body is still reported by the status below.
       }
       throw new ArkSearchError(
-        `Ark search endpoint ${JSON.stringify(endpoint)} returned HTTP ${response.status}${typeof detail === 'string' && detail.length > 0 ? `: ${detail}` : ''}. Check that "${options.model}" exists on this Ark endpoint and that the API key can reach the Responses API.`,
+        `Web search endpoint ${JSON.stringify(endpoint)} returned HTTP ${response.status}${typeof detail === 'string' && detail.length > 0 ? `: ${detail}` : ''}. Check that "${options.model}" exists on this endpoint and that the API key can reach the Responses API.`,
         'WEB_PROVIDER_ERROR',
       )
     }
@@ -364,7 +429,7 @@ export class ArkSearchProvider {
     try {
       payload = await response.json()
     } catch (error) {
-      throw new ArkSearchError('Ark search returned an unprocessable response body', 'WEB_PROVIDER_ERROR', {
+      throw new ArkSearchError('Web search returned an unprocessable response body', 'WEB_PROVIDER_ERROR', {
         cause: error,
       })
     }
@@ -398,6 +463,7 @@ export class ArkSearchProvider {
 /** Read the deployment row config into a plain object. */
 function readRowConfig(config) {
   return {
+    preset: read(config, 'preset'),
     apiKey: read(config, 'apiKey'),
     apiKeyEnv: read(config, 'apiKeyEnv'),
     baseURL: read(config, 'baseURL'),
@@ -456,9 +522,9 @@ export function findProfilePatchFiles(home = homedir()) {
 }
 
 /**
- * Register the Ark search provider with `ctx.web`, plus the Plugins-card HTTP
- * surface. Options are re-resolved on every search so saving from the card
- * takes effect immediately (no Host restart).
+ * Register the Responses-API search provider with `ctx.web`, plus the
+ * Plugins-card HTTP surface. Options are re-resolved on every search so saving
+ * from the card takes effect immediately (no Host restart).
  *
  * Also logs a loud warning when the seam's selection does not (yet) point at
  * this provider: mounting is not activation, and 1.1.0 kept that invisible.
@@ -475,17 +541,20 @@ export function apply(ctx, config) {
       // A missing logger must not break registration.
     }
   }
+  const preset = PRESETS[resolvePreset(read(config, 'preset'))]
   const { configuredId, registeredIds } = readSeamSelection(ctx.web)
   if (configuredId === null) {
     warn(
-      `dsh-web-search-ark mounted but web.searchProvider is unset — searches use Ark only if it is the single usable provider. Add "config: { searchProvider: ark-official }" to the web row to activate.`,
+      `dsh-web-search-ark mounted but web.searchProvider is unset — searches use ${preset.label} only if it is the single usable provider. Add "config: { searchProvider: ark-official }" to the web row to activate.`,
     )
   } else if (configuredId !== SEARCH_PROVIDER_ID) {
     warn(
-      `dsh-web-search-ark mounted but web.searchProvider is "${configuredId}" — searches will NOT use Ark until selected. See the plugin README ("激活").`,
+      `dsh-web-search-ark mounted but web.searchProvider is "${configuredId}" — searches will NOT use ${preset.label} until selected. See the plugin README ("激活").`,
     )
   } else if (registeredIds !== null && !provider.available()) {
-    warn(`web.searchProvider selects ${SEARCH_PROVIDER_ID} but the provider is currently unavailable — check the Ark credentials or baseURL config.`)
+    warn(
+      `web.searchProvider selects ${SEARCH_PROVIDER_ID} but the provider is currently unavailable — check the credentials or baseURL config for preset "${getOptions().preset}".`,
+    )
   }
 
   const checkKey = async () => {
@@ -502,6 +571,17 @@ export function apply(ctx, config) {
     return {
       mounted: true,
       providerId: SEARCH_PROVIDER_ID,
+      preset: options.preset,
+      presetLabel: PRESETS[options.preset].label,
+      baseURL: options.baseURL,
+      model: options.model,
+      presets: Object.entries(PRESETS).map(([id, entry]) => ({
+        id,
+        label: entry.label,
+        baseURL: entry.baseURL,
+        model: entry.model,
+        supportsMaxKeyword: entry.supportsMaxKeyword,
+      })),
       configuredSearchProvider: selection.configuredId,
       registeredSearchProviders: selection.registeredIds,
       selected: computeSelected(selection.configuredId, selection.registeredIds, provider.available()),

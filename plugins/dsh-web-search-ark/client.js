@@ -18,24 +18,31 @@ const NS = 'arkSearch'
 const ENDPOINT = '/ark-search'
 
 const zh = {
-  summary: '火山方舟联网内容插件（豆包搜索）。模型、端点与关键词上限均可在本页调整。',
-  title: '方舟联网搜索',
-  intro: 'dsl 内置的 web_search 通过方舟 Responses API 的原生 web_search 工具检索，底层执行的就是豆包搜索。保存后对下一次搜索立即生效，不需要重启。',
+  summary: 'OpenAI Responses 风格的联网搜索后端（火山方舟 / 千问 Token Plan / 自定义兼容端点）。模型、端点与关键词上限均可在本页调整。',
+  title: '联网搜索（Responses web_search）',
+  intro: 'DSH 内置的 web_search 通过后端的 Responses API 原生 web_search 工具检索。切换预设即可更换后端，保存后对下一次搜索立即生效，不需要重启。',
   groupCore: '连接',
+  preset: '后端预设',
+  presetHint: 'Ark / 千问 / 自定义 OpenAI 兼容端点；切换后自动填入该后端的默认地址与模型',
+  presetArk: '火山方舟 Ark',
+  presetQwen: '千问 Token Plan',
+  presetCustom: '自定义（OpenAI 兼容）',
   apiKeyEnv: '凭证名',
   apiKeyEnvHint: '在 ~/.dsh/.credentials.yaml 或启动环境里定义的变量名',
   apiKey: '直接密钥（覆盖凭证名）',
   apiKeyHint: '留空则使用上面的凭证名',
   baseURL: '接口地址',
-  baseURLHint: '套餐 key 用 /api/plan/v3，标准 key 用 /api/v3',
+  baseURLHint: '方舟套餐 key 用 /api/plan/v3，标准 key 用 /api/v3；千问用 compatible-mode/v1',
   groupSearch: '检索',
   model: '执行搜索的模型',
   modelHint: '必须支持 web_search 工具',
   maxKeyword: '单轮关键词上限',
   maxKeywordHint: '方舟允许 1–50，直接影响计费次数',
+  maxKeywordUnsupported: '当前后端没有关键词参数，此项不生效',
   timeoutMs: '超时（毫秒）',
   statusChecking: '正在检查启用状态…',
   statusOn: '已启用：web.searchProvider → ark-official',
+  statusOnPreset: '已启用：web.searchProvider → ark-official（后端：{label}）',
   statusOffConfigured: '未启用：当前 web.searchProvider 是 “{id}”，搜索不会经过方舟',
   statusOffUnset: '未启用：web.searchProvider 未设置，且存在多个搜索 provider，无法自动选中',
   statusUnknown: '无法确定启用状态（当前 Host 未暴露 selection）；若搜索仍走旧 provider，请检查 web 行 selection',
@@ -61,24 +68,31 @@ const zh = {
 }
 
 const en = {
-  summary: 'Volcengine Ark web search (Doubao). Model, endpoint and keyword bound are editable here.',
-  title: 'Ark web search',
-  intro: 'The built-in web_search runs through Ark Responses API native web_search, backed by Doubao search. Saving takes effect on the next search — no restart.',
+  summary: 'OpenAI Responses-style web-search backend (Volcengine Ark / Qwen Token Plan / custom compatible endpoint). Model, endpoint and keyword bound are editable here.',
+  title: 'Web search (Responses web_search)',
+  intro: 'The built-in web_search runs through the backend’s native Responses API web_search tool. Switch the preset to change backends; saving takes effect on the next search — no restart.',
   groupCore: 'Connection',
+  preset: 'Backend preset',
+  presetHint: 'Ark / Qwen / a custom OpenAI-compatible endpoint; switching fills in that backend’s default URL and model',
+  presetArk: 'Volcengine Ark',
+  presetQwen: 'Qwen Token Plan',
+  presetCustom: 'Custom (OpenAI-compatible)',
   apiKeyEnv: 'Credential name',
   apiKeyEnvHint: 'A variable name defined in ~/.dsh/.credentials.yaml or the launching environment',
   apiKey: 'Literal key (overrides the credential)',
   apiKeyHint: 'Leave empty to use the credential name above',
   baseURL: 'Base URL',
-  baseURLHint: 'Plan keys use /api/plan/v3, standard keys use /api/v3',
+  baseURLHint: 'Ark plan keys use /api/plan/v3, standard keys /api/v3; Qwen uses compatible-mode/v1',
   groupSearch: 'Retrieval',
   model: 'Search model',
   modelHint: 'Must support the web_search tool',
   maxKeyword: 'Max keywords per round',
   maxKeywordHint: 'Ark allows 1–50; drives billing',
+  maxKeywordUnsupported: 'This backend has no keyword parameter — ignored here',
   timeoutMs: 'Timeout (ms)',
   statusChecking: 'Checking activation…',
   statusOn: 'Enabled: web.searchProvider → ark-official',
+  statusOnPreset: 'Enabled: web.searchProvider → ark-official (backend: {label})',
   statusOffConfigured: 'Not enabled: web.searchProvider is “{id}” — searches bypass Ark',
   statusOffUnset: 'Not enabled: web.searchProvider is unset and several search providers exist, so none is auto-selected',
   statusUnknown: 'Activation unknown (this Host does not expose the selection); if searches still use the old provider, check the web row selection',
@@ -160,6 +174,7 @@ function GroupTitle({ children }) {
 }
 
 const EMPTY_DRAFT = {
+  preset: 'ark',
   apiKeyEnv: '',
   apiKey: '',
   baseURL: '',
@@ -210,7 +225,9 @@ function StatusBadge({ t, status, loading }) {
         : 'var(--dsw-alias-label-caption)'
   const text =
     status.selected === true
-      ? t('statusOn')
+      ? status.presetLabel
+        ? format(t('statusOnPreset'), { label: status.presetLabel })
+        : t('statusOn')
       : status.selected === false
         ? status.configuredSearchProvider
           ? format(t('statusOffConfigured'), { id: status.configuredSearchProvider })
@@ -294,6 +311,7 @@ function ActivatePanel({ t, status }) {
 
 function draftOf(config) {
   return {
+    preset: config?.preset ?? 'ark',
     apiKeyEnv: config?.apiKeyEnv ?? '',
     apiKey: '',
     baseURL: config?.baseURL ?? '',
@@ -337,6 +355,28 @@ function ArkSearchForm({ t, view }) {
   if (view === 'summary') return t('summary')
 
   const patch = (key, value) => setDraft((previous) => ({ ...previous, [key]: value }))
+
+  const presets = Array.isArray(status?.presets) ? status.presets : []
+  const activePreset = presets.find((entry) => entry.id === draft.preset)
+  const supportsMaxKeyword = activePreset ? activePreset.supportsMaxKeyword !== false : true
+
+  /**
+   * Switch preset, carrying over a base URL / model only when the current value
+   * is empty or still matches another preset's default (i.e. not hand-edited).
+   */
+  const changePreset = (id) => {
+    const target = presets.find((entry) => entry.id === id)
+    setDraft((previous) => {
+      const next = { ...previous, preset: id }
+      if (!target) return next
+      const isDefaultish = (key) =>
+        !String(previous[key] ?? '').trim() ||
+        presets.some((entry) => entry.id !== id && entry[key] && entry[key] === previous[key])
+      if (isDefaultish('baseURL')) next.baseURL = target.baseURL ?? ''
+      if (isDefaultish('model')) next.model = target.model ?? ''
+      return next
+    })
+  }
 
   const save = async () => {
     setBusy('save')
@@ -402,6 +442,15 @@ function ArkSearchForm({ t, view }) {
       : null,
 
     h(GroupTitle, { key: 'g1' }, t('groupCore')),
+    h(Field, { key: 'f0', label: t('preset'), hint: t('presetHint') },
+      h('select', {
+        style: { ...inputStyle, cursor: 'pointer' },
+        value: draft.preset,
+        disabled: loading,
+        onChange: (event) => changePreset(event.target.value),
+      }, presets.length > 0
+        ? presets.map((entry) => h('option', { key: entry.id, value: entry.id }, entry.label))
+        : [h('option', { key: 'ark', value: 'ark' }, t('presetArk'))])),
     h(Field, { key: 'f1', label: t('apiKeyEnv'), hint: t('apiKeyEnvHint') },
       h('input', {
         style: inputStyle,
@@ -438,14 +487,14 @@ function ArkSearchForm({ t, view }) {
         onChange: (event) => patch('model', event.target.value),
       })),
     h('div', { key: 'row', style: { display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: 12 } }, [
-      h(Field, { key: 'f5', label: t('maxKeyword'), hint: t('maxKeywordHint') },
+      h(Field, { key: 'f5', label: t('maxKeyword'), hint: supportsMaxKeyword ? t('maxKeywordHint') : t('maxKeywordUnsupported') },
         h('input', {
-          style: inputStyle,
+          style: { ...inputStyle, opacity: supportsMaxKeyword ? 1 : 0.5 },
           type: 'number',
           min: 1,
           max: 50,
           value: draft.maxKeyword,
-          disabled: loading,
+          disabled: loading || !supportsMaxKeyword,
           onChange: (event) => patch('maxKeyword', Number(event.target.value)),
         })),
       h(Field, { key: 'f6', label: t('timeoutMs') },

@@ -107,6 +107,69 @@ try {
   const patchFiles = mod.findProfilePatchFiles(homedir())
   log('profile patch files', patchFiles)
 
+  // ---- preset resolution & defaults (v1.3.0) --------------------------------
+  check('presets exported', mod.PRESETS !== undefined && mod.PRESETS.qwen !== undefined)
+  check('default preset ark', mod.DEFAULT_PRESET === 'ark')
+  check('resolvePreset qwen', mod.resolvePreset('QWEN') === 'qwen')
+  check('resolvePreset unknown falls back', mod.resolvePreset('nope') === 'ark')
+  check('resolvePreset prototype-safe', mod.resolvePreset('toString') === 'ark')
+  check('qwen preset base', mod.PRESETS.qwen.baseURL.includes('qianwenaiapi.com'))
+  check('qwen preset no max_keyword', mod.PRESETS.qwen.supportsMaxKeyword === false)
+  check('qwen preset no include', mod.PRESETS.qwen.includeSources === false)
+  check('ark preset keeps knobs', mod.PRESETS.ark.supportsMaxKeyword === true && mod.PRESETS.ark.includeSources === true)
+
+  // A qwen-configured provider must be available even though maxKeyword is unset.
+  const qwenProvider = new mod.ArkSearchProvider({ get: () => undefined }, () => ({
+    preset: 'qwen',
+    supportsMaxKeyword: false,
+    includeSources: false,
+    apiKey: 'x',
+    apiKeyEnvs: ['QIANWEN_AI_API_KEY'],
+    baseURL: mod.PRESETS.qwen.baseURL,
+    model: mod.PRESETS.qwen.model,
+    maxKeyword: 5,
+    timeoutMs: 120000,
+  }))
+  check('qwen provider available', qwenProvider.available() === true)
+
+  // Same base URL with an out-of-range keyword on an Ark-configured provider.
+  const badArk = new mod.ArkSearchProvider({ get: () => undefined }, () => ({
+    preset: 'ark',
+    supportsMaxKeyword: true,
+    apiKey: 'x',
+    apiKeyEnvs: ['ARK_API_KEY'],
+    baseURL: mod.PRESETS.ark.baseURL,
+    model: mod.PRESETS.ark.model,
+    maxKeyword: 999,
+    timeoutMs: 120000,
+  }))
+  check('ark provider rejects bad keyword', badArk.available() === false)
+
+  // ---- qwen-shaped payload mapping (no titles, no annotations) --------------
+  const qwenPayload = {
+    output: [
+      { type: 'reasoning' },
+      {
+        type: 'web_search_call',
+        action: {
+          query: '杭州今天天气',
+          type: 'search',
+          sources: [
+            { type: 'url', url: 'https://www.weather.com.cn/weather/101210101.shtml' },
+            { type: 'url', url: 'https://www.weather.com.cn/weather/101210101.shtml' },
+            { type: 'url', url: 'https://aqicn.org/city/hangzhou/cn/' },
+          ],
+        },
+      },
+      { type: 'message', content: [{ type: 'output_text', annotations: [], text: 'ok' }] },
+    ],
+    tool_usage: { web_search: { num_requests: 1 } },
+  }
+  const qwenResult = mod.mapArkResponse(qwenPayload)
+  check('qwen sources deduped', qwenResult.sources.length === 2, qwenResult.sources)
+  check('qwen sources carry hostname fallback title', qwenResult.sources[0].title === 'www.weather.com.cn', qwenResult.sources[0])
+  check('qwen sources keep url', qwenResult.sources[0].url.startsWith('https://www.weather.com.cn/'), qwenResult.sources[0].url)
+
   // ---- response mapping regression ------------------------------------------
   const payload = {
     output: [
