@@ -17,7 +17,17 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } fr
 import { dirname, join } from 'node:path'
 
 /** Fields the card may write. Keeping this list tight prevents junk keys. */
-export const EDITABLE_FIELDS = ['preset', 'apiKey', 'apiKeyEnv', 'baseURL', 'model', 'maxKeyword', 'timeoutMs']
+export const EDITABLE_FIELDS = [
+  'preset',
+  'apiKey',
+  'apiKeyEnv',
+  'baseURL',
+  'model',
+  'maxKeyword',
+  'timeoutMs',
+  'enrichTitles',
+  'enrichTitleLimit',
+]
 
 /** Absolute path of the JSON layer. */
 export function settingsFile() {
@@ -41,7 +51,15 @@ export function pickSettings(source) {
   for (const key of EDITABLE_FIELDS) {
     const value = source[key]
     if (value === undefined || value === null) continue
-    if (key === 'maxKeyword' || key === 'timeoutMs') {
+    // Booleans must stay booleans: String(false) would round-trip as "false",
+    // which YAML/JSON consumers read back inconsistently.
+    if (key === 'enrichTitles') {
+      if (typeof value === 'boolean') out[key] = value
+      else if (String(value).toLowerCase() === 'true') out[key] = true
+      else if (String(value).toLowerCase() === 'false') out[key] = false
+      continue
+    }
+    if (key === 'maxKeyword' || key === 'timeoutMs' || key === 'enrichTitleLimit') {
       const numeric = Number(value)
       if (Number.isInteger(numeric) && numeric > 0) out[key] = numeric
       continue

@@ -39,6 +39,13 @@ const zh = {
   maxKeyword: '单轮关键词上限',
   maxKeywordHint: '方舟允许 1–50，直接影响计费次数',
   maxKeywordUnsupported: '当前后端没有关键词参数，此项不生效',
+  groupEnrich: '来源标题补全',
+  enrichTitles: '抓取来源网页标题',
+  enrichTitlesHint: '部分后端（如千问）只返回链接不给标题。开启后对前 N 条各抓一次网页 <title>，每次搜索会多一些耗时',
+  enrichTitleLimit: '补全条数',
+  enrichTitleLimitHint: '1–10，越大越慢；抓取失败会自动保留域名',
+  enabled: '已开启',
+  disabledLabel: '已关闭',
   timeoutMs: '超时（毫秒）',
   statusChecking: '正在检查启用状态…',
   statusOn: '已启用：web.searchProvider → ark-official',
@@ -89,6 +96,13 @@ const en = {
   maxKeyword: 'Max keywords per round',
   maxKeywordHint: 'Ark allows 1–50; drives billing',
   maxKeywordUnsupported: 'This backend has no keyword parameter — ignored here',
+  groupEnrich: 'Source titles',
+  enrichTitles: 'Fetch page titles',
+  enrichTitlesHint: 'Some backends (e.g. Qwen) return links without titles. When on, the first N sources each get one <title> fetch, adding some latency per search',
+  enrichTitleLimit: 'How many sources',
+  enrichTitleLimitHint: '1–10; higher is slower. A failed fetch keeps the hostname',
+  enabled: 'Enabled',
+  disabledLabel: 'Disabled',
   timeoutMs: 'Timeout (ms)',
   statusChecking: 'Checking activation…',
   statusOn: 'Enabled: web.searchProvider → ark-official',
@@ -181,6 +195,8 @@ const EMPTY_DRAFT = {
   model: '',
   maxKeyword: 5,
   timeoutMs: 120000,
+  enrichTitles: false,
+  enrichTitleLimit: 5,
 }
 
 // Activation selection snippet — the exact text the card copies for the user.
@@ -318,6 +334,8 @@ function draftOf(config) {
     model: config?.model ?? '',
     maxKeyword: Number(config?.maxKeyword ?? 5),
     timeoutMs: Number(config?.timeoutMs ?? 120000),
+    enrichTitles: config?.enrichTitles === true,
+    enrichTitleLimit: Number(config?.enrichTitleLimit ?? 5),
   }
 }
 
@@ -506,6 +524,35 @@ function ArkSearchForm({ t, view }) {
           value: draft.timeoutMs,
           disabled: loading,
           onChange: (event) => patch('timeoutMs', Number(event.target.value)),
+        })),
+    ]),
+
+    h(GroupTitle, { key: 'g3' }, t('groupEnrich')),
+    h('div', { key: 'row2', style: { display: 'grid', gridTemplateColumns: 'minmax(0,2fr) minmax(0,1fr)', gap: 12, alignItems: 'start' } }, [
+      h(Field, { key: 'f7', label: t('enrichTitles'), hint: t('enrichTitlesHint') },
+        h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, height: 36, cursor: loading ? 'default' : 'pointer' } }, [
+          h('input', {
+            key: 'c',
+            type: 'checkbox',
+            checked: draft.enrichTitles === true,
+            disabled: loading,
+            style: { width: 16, height: 16, margin: 0, cursor: loading ? 'default' : 'pointer' },
+            onChange: (event) => patch('enrichTitles', event.target.checked === true),
+          }),
+          h('span', {
+            key: 's',
+            style: { fontSize: 13, lineHeight: '18px', color: 'var(--dsw-alias-label-primary)' },
+          }, draft.enrichTitles === true ? t('enabled') : t('disabledLabel')),
+        ])),
+      h(Field, { key: 'f8', label: t('enrichTitleLimit'), hint: t('enrichTitleLimitHint') },
+        h('input', {
+          style: { ...inputStyle, opacity: draft.enrichTitles === true ? 1 : 0.5 },
+          type: 'number',
+          min: 1,
+          max: 10,
+          value: draft.enrichTitleLimit,
+          disabled: loading || draft.enrichTitles !== true,
+          onChange: (event) => patch('enrichTitleLimit', Number(event.target.value)),
         })),
     ]),
 

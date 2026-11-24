@@ -9,6 +9,9 @@
 #   model       model id that runs the search sub-task (must support web_search)
 #   maxKeyword  max keyword searches one round may fan out to (Ark only, 1-50)
 #   timeoutMs   per-search timeout
+#   enrichTitles      fetch real page <title> for sources that only have a
+#                     hostname (default false; adds latency per search)
+#   enrichTitleLimit  how many sources to enrich, 1-10 (default 5)
 #
 # Mounting does NOT select the provider. Activate with:
 #   - id: web \n    config: { searchProvider: ark-official }

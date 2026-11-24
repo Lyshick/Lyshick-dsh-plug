@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-search-ark",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "OpenAI Responses-style web-search provider for DeepSeek Harness (Volcengine Ark, Qwen Token Plan, or any compatible endpoint): routes the built-in web_search capability through the backend's native web_search tool, with a configuration card in the sidebar Plugins page.",
   "type": "module",
   "main": "index.js",

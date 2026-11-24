@@ -104,8 +104,17 @@ const DEFAULT_MAX_KEYWORD = 5
 /** Default per-search timeout in milliseconds. */
 const DEFAULT_TIMEOUT_MS = 120_000
 
+/** Default number of sources whose title is enriched (opt-in feature). */
+const DEFAULT_ENRICH_LIMIT = 5
+
+/** Upper byte budget when reading a page <head> just to find <title>. */
+const ENRICH_MAX_BYTES = 64 * 1024
+
+/** Per-page timeout for the title enrichment fetch. */
+const ENRICH_TIMEOUT_MS = 6_000
+
 /** Attribution header sent on every request. */
-const USER_AGENT = 'dsh-web-search-ark/1.3.0'
+const USER_AGENT = 'dsh-web-search-ark/1.4.0'
 
 /**
  * Error carrying the seam's machine-routable `code`. `@deepseek-ai/dsh-web`'s
@@ -171,6 +180,8 @@ function normalizeOptions(config) {
   const preset = PRESETS[presetId]
   const maxKeyword = Number(read(config, 'maxKeyword'))
   const timeoutMs = Number(read(config, 'timeoutMs'))
+  const enrichRaw = read(config, 'enrichTitles')
+  const enrichLimit = Number(read(config, 'enrichTitleLimit'))
   return {
     preset: presetId,
     supportsMaxKeyword: preset.supportsMaxKeyword,
@@ -181,6 +192,10 @@ function normalizeOptions(config) {
     model: String(read(config, 'model') ?? '').trim() || preset.model,
     maxKeyword: Number.isInteger(maxKeyword) && maxKeyword >= 1 && maxKeyword <= 50 ? maxKeyword : DEFAULT_MAX_KEYWORD,
     timeoutMs: Number.isInteger(timeoutMs) && timeoutMs >= 1000 ? timeoutMs : DEFAULT_TIMEOUT_MS,
+    // Accepts a real boolean from the card or the strings YAML/JSON may carry.
+    enrichTitles: enrichRaw === true || String(enrichRaw ?? '').toLowerCase() === 'true',
+    enrichTitleLimit:
+      Number.isInteger(enrichLimit) && enrichLimit >= 1 && enrichLimit <= 10 ? enrichLimit : DEFAULT_ENRICH_LIMIT,
   }
 }
 
@@ -191,6 +206,138 @@ function hostnameOf(value) {
   } catch {
     return undefined
   }
+}
+
+/**
+ * Decode a numeric/named HTML entity. Anything unparseable becomes empty so a
+ * bad entity never aborts the whole title.
+ */
+function fromCodePoint(code) {
+  try {
+    return String.fromCodePoint(code)
+  } catch {
+    return ''
+  }
+}
+
+/** Decode the handful of entities that realistically appear inside <title>. */
+function decodeEntities(text) {
+  return String(text)
+    .replace(/&#x([0-9a-f]+);/giu, (_, hex) => fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#(\d+);/gu, (_, dec) => fromCodePoint(Number.parseInt(dec, 10)))
+    .replace(/&nbsp;/gu, ' ')
+    .replace(/&quot;/gu, '"')
+    .replace(/&#39;|&apos;/gu, "'")
+    .replace(/&lt;/gu, '<')
+    .replace(/&gt;/gu, '>')
+    // `&amp;` last, so an escaped entity is never decoded twice.
+    .replace(/&amp;/gu, '&')
+}
+
+/**
+ * Decode page bytes using the declared charset (header first, then <meta>).
+ *
+ * Chinese sites still ship GBK pages, so assuming UTF-8 would produce mojibake
+ * titles — worse than the hostname fallback. TextDecoder with an unknown label
+ * throws, and we fall back to UTF-8 in that case.
+ */
+function decodeHtml(bytes, contentType) {
+  const head = bytes.subarray(0, 4096).toString('latin1')
+  const fromHeader = /charset=["']?([\w-]+)/iu.exec(String(contentType ?? ''))?.[1]
+  const fromMeta = /<meta[^>]+charset=["']?([\w-]+)/iu.exec(head)?.[1]
+  const label = String(fromHeader ?? fromMeta ?? 'utf-8').toLowerCase()
+  try {
+    return new TextDecoder(label).decode(bytes)
+  } catch {
+    return new TextDecoder('utf-8').decode(bytes)
+  }
+}
+
+/** Read at most `maxBytes` of a response body, stopping early at `</title>`. */
+async function readHeadBytes(response, maxBytes, signal) {
+  const reader = response.body?.getReader()
+  if (!reader) return new Uint8Array(0)
+  const chunks = []
+  let total = 0
+  let probe = ''
+  try {
+    while (total < maxBytes) {
+      if (signal?.aborted === true) break
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(value)
+      total += value.length
+      probe += Buffer.from(value).toString('latin1')
+      if (probe.includes('</title>')) break
+    }
+  } finally {
+    try {
+      await reader.cancel()
+    } catch {
+      // Cancelling an already-finished stream is not an error worth surfacing.
+    }
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)))
+}
+
+/** Fetch one page and extract a cleaned <title>; any failure yields undefined. */
+async function fetchPageTitle(url, signal) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new Error('title fetch timed out')), ENRICH_TIMEOUT_MS)
+  const onAbort = () => controller.abort(signal?.reason)
+  signal?.addEventListener('abort', onAbort, { once: true })
+  try {
+    const response = await fetch(url, {
+      redirect: 'follow',
+      headers: { accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8', 'user-agent': USER_AGENT },
+      signal: controller.signal,
+    })
+    if (!response.ok) return undefined
+    const contentType = response.headers.get('content-type') ?? ''
+    if (!/text\/html|application\/xhtml\+xml/iu.test(contentType)) return undefined
+    const bytes = await readHeadBytes(response, ENRICH_MAX_BYTES, controller.signal)
+    if (bytes.length === 0) return undefined
+    const html = decodeHtml(bytes, contentType)
+    const match = /<title[^>]*>([\s\S]*?)<\/title>/iu.exec(html)
+    if (!match) return undefined
+    const title = decodeEntities(match[1]).replace(/\s+/gu, ' ').trim()
+    // A title made only of replacement characters means the charset was wrong.
+    return title.length > 0 && !/^[\uFFFD\s]+$/u.test(title) ? title : undefined
+  } catch {
+    return undefined
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onAbort)
+  }
+}
+
+/**
+ * Fill in real page titles for the first N sources that only have the hostname
+ * fallback (Qwen returns `url` alone). Best-effort by design: a failed or slow
+ * page keeps its hostname, and the search itself never fails because of this.
+ *
+ * @param sources - mapped sources, mutated in place.
+ * @param options - normalized options carrying the enrichment settings.
+ * @param signal - the caller's abort signal.
+ */
+async function enrichSourceTitles(sources, options, signal) {
+  const limit = Math.min(Number(options.enrichTitleLimit) || 0, sources.length)
+  if (limit <= 0 || signal?.aborted === true) return sources
+  const targets = []
+  for (let index = 0; index < limit; index += 1) {
+    const source = sources[index]
+    if (source === undefined) continue
+    // Only replace the hostname placeholder; never overwrite a real title.
+    if (typeof source.title === 'string' && source.title !== hostnameOf(source.url)) continue
+    targets.push(source)
+  }
+  if (targets.length === 0) return sources
+  const titles = await Promise.all(targets.map((source) => fetchPageTitle(source.url, signal)))
+  targets.forEach((source, index) => {
+    const title = titles[index]
+    if (typeof title === 'string' && title.length > 0) source.title = title
+  })
+  return sources
 }
 
 /**
@@ -434,6 +581,9 @@ export class ArkSearchProvider {
       })
     }
     const result = mapArkResponse(payload)
+    if (options.enrichTitles) {
+      await enrichSourceTitles(result.sources, options, signal)
+    }
     outcome.ok = true
     outcome.code = 'OK'
     outcome.sources = result.sources.length
@@ -470,6 +620,8 @@ function readRowConfig(config) {
     model: read(config, 'model'),
     maxKeyword: read(config, 'maxKeyword'),
     timeoutMs: read(config, 'timeoutMs'),
+    enrichTitles: read(config, 'enrichTitles'),
+    enrichTitleLimit: read(config, 'enrichTitleLimit'),
   }
 }
 

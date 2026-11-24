@@ -78,7 +78,7 @@
 |---|---|---|
 | `max_keyword` | 支持（1–50，直接影响计费次数） | **不支持**，preset 下不发送，卡片中该项禁用 |
 | `include: web_search_call.action.sources` | 需显式请求 | **不需**，默认就返回 |
-| 来源标题 | `title` / `site_name` / `summary` / `publish_time` 齐全 | **只有 `url`**，插件用域名兜底标题 |
+| 来源标题 | `title` / `site_name` / `summary` / `publish_time` 齐全 | **只有 `url`**，插件用域名兜底，可开启标题补全 |
 | `annotations[].url_citation` | 有（含 `summary` 长摘要） | `annotations` 恒为空数组 |
 | 计费计数 | 无 | `tool_usage.web_search.num_requests` |
 | 检索方式 | web_search 工具内多轮 | agent 式多轮（实测一次查询 3 次 `web_search_call`） |
@@ -97,6 +97,34 @@
 | `model` | 按 preset | 执行搜索的模型，必须支持 `web_search` |
 | `maxKeyword` | `5` | 单轮关键词上限（仅 Ark/custom 生效） |
 | `timeoutMs` | `120000` | 单次搜索超时 |
+| `enrichTitles` | `false` | 对只返回域名的来源补抓真实网页标题，见下节 |
+| `enrichTitleLimit` | `5` | 补全前几条来源（1–10） |
+
+## 来源标题补全（可选）
+
+千问的 Responses API **只返回链接、不给标题**，所以来源列表默认只能看到域名。
+开启 `enrichTitles` 后，插件会对**前 N 条只有域名兜底标题**的来源各抓一次网页，
+从 `<head>` 里提取 `<title>`：
+
+```json
+// ~/.dsh/web-search-ark.json
+{ "enrichTitles": true, "enrichTitleLimit": 5 }
+```
+
+实测对比（同一个查询，千问后端）：
+
+| | 标题 | 耗时 |
+|---|---|---|
+| 关闭 | `www.weather.com.cn` | 3.1 s |
+| 开启（5 条） | `杭州天气预报,杭州7天天气预报…` | 6.3 s |
+
+实现上的克制之处：
+
+- **只补兜底标题**，后端已给出真实标题的来源不会被覆盖或重复抓取
+- 只读**前 64 KB**，找到 `</title>` 就提前中断，不下载整页
+- 按响应头 / `<meta charset>` 解码，中文 GBK 页面不会变成乱码（解码失败则保留域名）
+- 单页 6 s 超时、失败静默降级——**抓标题失败绝不会让搜索失败**
+- 默认关闭，因为它是「用延迟换可读性」的取舍
 
 ## 为什么不用内置 provider
 
@@ -155,7 +183,7 @@ seam selection 的探测是**鸭子式**读取 `ctx.web` 实例的公开字段�
 
 ```bash
 set ELECTRON_RUN_AS_NODE=1
-"D:\DSH\DeepSeek Harness.exe" _selftest.mjs   # 离线：映射/去重/错误码/凭证回退/失败审计/preset（36 项断言）
+"D:\DSH\DeepSeek Harness.exe" _selftest.mjs   # 离线：映射/去重/错误码/凭证回退/失败审计/preset/设置归一化（42 项断言）
 "D:\DSH\DeepSeek Harness.exe" _parsetest.mjs  # 用真实响应样本验证映射
 ```
 
@@ -164,6 +192,9 @@ set ELECTRON_RUN_AS_NODE=1
 ```bash
 set QWEN_KEY=<你的千问 key>
 "D:\DSH\DeepSeek Harness.exe" _qwentest.mjs
+
+set ENRICH=1
+"D:\DSH\DeepSeek Harness.exe" _qwentest.mjs   # 同时验证标题补全
 ```
 
 ## 回滚

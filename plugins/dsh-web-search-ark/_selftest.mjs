@@ -170,6 +170,19 @@ try {
   check('qwen sources carry hostname fallback title', qwenResult.sources[0].title === 'www.weather.com.cn', qwenResult.sources[0])
   check('qwen sources keep url', qwenResult.sources[0].url.startsWith('https://www.weather.com.cn/'), qwenResult.sources[0].url)
 
+  // ---- settings normalization: booleans must not stringify (v1.4.0) --------
+  const routes = await import('./lib/routes.js')
+  const pickedTrue = routes.pickSettings({ enrichTitles: true, enrichTitleLimit: 7 })
+  check('pickSettings keeps boolean true', pickedTrue.enrichTitles === true, pickedTrue)
+  check('pickSettings keeps limit numeric', pickedTrue.enrichTitleLimit === 7, pickedTrue.enrichTitleLimit)
+  const pickedFalse = routes.pickSettings({ enrichTitles: false })
+  check('pickSettings keeps boolean false (not "false")', pickedFalse.enrichTitles === false, pickedFalse.enrichTitles)
+  const pickedString = routes.pickSettings({ enrichTitles: 'true' })
+  check('pickSettings coerces "true" string', pickedString.enrichTitles === true, pickedString.enrichTitles)
+  const pickedJunk = routes.pickSettings({ enrichTitles: 'maybe', enrichTitleLimit: 0 })
+  check('pickSettings drops junk', pickedJunk.enrichTitles === undefined && pickedJunk.enrichTitleLimit === undefined, pickedJunk)
+  check('EDITABLE_FIELDS covers enrich', routes.EDITABLE_FIELDS.includes('enrichTitles') && routes.EDITABLE_FIELDS.includes('enrichTitleLimit'))
+
   // ---- response mapping regression ------------------------------------------
   const payload = {
     output: [
